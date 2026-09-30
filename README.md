@@ -21,6 +21,24 @@ once, with those fixes, so a defect is fixed once for every runtime.
 
 Design: [`docs/specs/2026-09-30-protoio-design.md`](docs/specs/2026-09-30-protoio-design.md).
 
+## The protoCore ecosystem
+
+| Project | Role | Repository |
+|---|---|---|
+| protoCore | C++20 object model and runtime kernel: immutable structures, concurrent GC, GIL-free threads | https://github.com/numaes/protoCore |
+| protoJS | JavaScript runtime on protoCore | https://github.com/gamarino/protoJS |
+| protoPython | Python 3 runtime (protopy) and ahead-of-time compiler (protopyc) on protoCore | https://github.com/gamarino/protoPython |
+| protoScala | Scala 3 dialect on protoCore: object model, pattern matching, GIL-free actors | https://github.com/gamarino/protoScala |
+| protoST | Smalltalk-inspired actor language on protoCore | https://github.com/gamarino/protoST |
+| protoClojure | Clojure dialect on protoCore (early stage) | https://github.com/gamarino/protoClojure |
+| protoCpp | Examples and benchmarks using protoCore directly from C++ | https://github.com/gamarino/protoCpp |
+| protoIO | Shared input and output for the runtimes: files, processes, TCP, UDP, TLS and HTTP/1.1 (used by protoST, protoScala and protoClojure) | https://github.com/gamarino/protoIO |
+
+Each runtime documents the I/O it exposes in its own language: protoST in
+[tutorial chapter 15](https://github.com/gamarino/protoST/blob/main/docs/tutorial/15-input-and-output.md),
+protoScala in [tutorial chapter 18](https://github.com/gamarino/protoScala/blob/main/docs/tutorial/18-input-and-output.md), protoClojure in [tutorial chapter 14](https://github.com/gamarino/protoClojure/blob/main/docs/tutorial/14-input-and-output.md) and
+[`docs/LANGUAGE.md` §18](https://github.com/gamarino/protoClojure/blob/main/docs/LANGUAGE.md#18-input-and-output).
+
 ## API overview
 
 Everything is in namespace `protoio`. Descriptors are plain `int`s.
