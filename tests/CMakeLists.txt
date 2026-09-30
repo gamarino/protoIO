@@ -13,13 +13,22 @@ FetchContent_MakeAvailable(googletest)
 
 include(GoogleTest)
 
+# A ThreadSanitizer binary needs ASLR off on recent kernels (`setarch -R`),
+# so under TSan the tests are listed when ctest runs, inside that wrapper,
+# rather than right after the build.
+if(PROTOIO_TSAN)
+    set(PROTOIO_DISCOVERY_MODE PRE_TEST)
+else()
+    set(PROTOIO_DISCOVERY_MODE POST_BUILD)
+endif()
+
 # One binary per module, so the ThreadSanitizer run can pick the stream, net
 # and process suites by label.
 function(protoio_test name label)
     add_executable(${name} ${name}.cpp test_support.cpp)
     target_link_libraries(${name} PRIVATE protoIO::protoio GTest::gtest_main)
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    gtest_discover_tests(${name} PROPERTIES LABELS ${label} TIMEOUT 60 DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(${name} DISCOVERY_MODE ${PROTOIO_DISCOVERY_MODE} PROPERTIES LABELS ${label} TIMEOUT 60 DISCOVERY_TIMEOUT 30)
 endfunction()
 
 protoio_test(test_stream  stream)
