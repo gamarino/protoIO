@@ -1,6 +1,6 @@
 # protoIO: shared input and output for the protoCore runtimes
 
-Status: **draft for review** (2026-09-30). Author: Gustavo Marino, with Claude.
+Status: **approved** (2026-09-30). Author: Gustavo Marino, with Claude.
 
 ## 1. Goal
 
@@ -218,12 +218,8 @@ green, docs, CHANGELOG, and the tutorial updated.
    tutorial chapter.
 6. **Packaging.** Rebuild the installers of the three runtimes.
 
-## 7. Open points for the maintainer
+## 7. Decisions on the open points (2026-09-30)
 
-- **GitHub owner** for the new `protoIO` repository: `gamarino` or `numaes`.
-  Nothing is pushed until you confirm.
-- **HTTP clients.** protoScala's follows requests-scala; protoClojure's
-  follows babashka http-client plus Ring. Alternatives: sttp for Scala,
-  clj-http for Clojure.
-- **Windows.** The library is POSIX-only, as protoST's layer is (WSL2 on
-  Windows).
+- The repository is `gamarino/protoIO`, public like the runtimes'. It is pushed at the end of the whole work.
+- HTTP clients follow the proposal: requests-scala for protoScala; babashka http-client and Ring for protoClojure.
+- POSIX only; Windows through WSL2.
