@@ -1,0 +1,260 @@
+// Buffered streams: reading lines, bytes and characters, limits, concurrent
+// readers, close waking a blocked reader, and writes that never raise SIGPIPE.
+#include "protoio/error.h"
+#include "protoio/stream.h"
+
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <map>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include <sys/socket.h>
+#include <unistd.h>
+
+using protoio::Error;
+using namespace std::chrono_literals;
+
+namespace {
+
+struct Pipe {
+    int r = -1, w = -1;
+    Pipe() {
+        int p[2];
+        if (::pipe(p) != 0) throw std::runtime_error("pipe");
+        r = p[0];
+        w = p[1];
+        protoio::forget(r);
+        protoio::forget(w);
+    }
+    ~Pipe() {
+        if (r >= 0) protoio::close(r);
+        if (w >= 0) protoio::close(w);
+    }
+    void closeWriter() { protoio::close(w); w = -1; }
+};
+
+struct SocketPair {
+    int a = -1, b = -1;
+    SocketPair() {
+        int s[2];
+        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) != 0) throw std::runtime_error("socketpair");
+        a = s[0];
+        b = s[1];
+        protoio::forget(a);
+        protoio::forget(b);
+    }
+    ~SocketPair() {
+        protoio::close(a);
+        protoio::close(b);
+    }
+};
+
+} // namespace
+
+TEST(Stream, ReadLineStripsLfAndCrlfAndAnswersNulloptAtEnd) {
+    Pipe p;
+    protoio::write(p.w, "one\ntwo\r\n\nlast");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readLine(p.r), "one");
+    EXPECT_EQ(protoio::readLine(p.r), "two");
+    EXPECT_EQ(protoio::readLine(p.r), "");
+    EXPECT_EQ(protoio::readLine(p.r), "last");
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+}
+
+TEST(Stream, ReadAllAnswersEverythingThenEmpty) {
+    Pipe p;
+    protoio::write(p.w, "line\nrest of it");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readLine(p.r), "line");
+    EXPECT_EQ(protoio::readAll(p.r), "rest of it");
+    EXPECT_EQ(protoio::readAll(p.r), "");
+    EXPECT_TRUE(protoio::atEnd(p.r));
+}
+
+TEST(Stream, ReadBytesAnswersUpToNThenNullopt) {
+    Pipe p;
+    protoio::write(p.w, "abcdefg");
+    p.closeWriter();
+    EXPECT_FALSE(protoio::atEnd(p.r));
+    EXPECT_EQ(protoio::readBytes(p.r, 3), "abc");
+    EXPECT_EQ(protoio::readBytes(p.r, 10), "defg");
+    EXPECT_EQ(protoio::readBytes(p.r, 1), std::nullopt);
+    EXPECT_EQ(protoio::readBytes(p.r, 0), "");
+}
+
+TEST(Stream, ReadCharsKeepsACharacterSplitAcrossReads) {
+    Pipe p;
+    // "aé€b": the é (C3 A9) is cut in two by the first write.
+    protoio::write(p.w, "a\xC3");
+    std::thread writer([&] {
+        std::this_thread::sleep_for(100ms);
+        protoio::write(p.w, "\xA9\xE2\x82\xAC" "b");
+        p.closeWriter();
+    });
+    EXPECT_EQ(protoio::readChars(p.r, 2), "a\xC3\xA9");
+    EXPECT_EQ(protoio::readChars(p.r, 1), "\xE2\x82\xAC");
+    EXPECT_EQ(protoio::readChars(p.r, 5), "b");
+    EXPECT_EQ(protoio::readChars(p.r, 1), std::nullopt);
+    writer.join();
+}
+
+TEST(Stream, ReadCharsAnswersATruncatedSequenceAtEnd) {
+    Pipe p;
+    protoio::write(p.w, "x\xE2\x82");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readChars(p.r, 5), "x\xE2\x82");
+}
+
+TEST(Stream, ReadLineOverMaxThrowsLineTooLong) {
+    Pipe p;
+    protoio::write(p.w, "12345\r\n" + std::string(100, 'x') + "\nnext\n");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readLine(p.r, 5), "12345");  // exactly max, CRLF not counted
+    try {
+        protoio::readLine(p.r, 10);
+        FAIL() << "expected LineTooLong";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::LineTooLong);
+    }
+}
+
+TEST(Stream, ReadLineMaxStopsReadingAnEndlessLine) {
+    SocketPair s;
+    // The writer never sends a newline and never closes: the reader must give
+    // up once it holds more than `max` bytes instead of waiting forever.
+    protoio::write(s.b, std::string(200000, 'y'));
+    try {
+        protoio::readLine(s.a, 8192);
+        FAIL() << "expected LineTooLong";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::LineTooLong);
+    }
+}
+
+TEST(Stream, ConcurrentReadersGetEachLineExactlyOnceAndWhole) {
+    Pipe p;
+    constexpr int kLines = 20000;
+    std::thread writer([&] {
+        std::string chunk;
+        for (int i = 0; i < kLines; ++i) {
+            chunk += "line-" + std::to_string(i) + "-" + std::string(i % 37, 'z') + "\n";
+            if (chunk.size() > 3000) { protoio::write(p.w, chunk); chunk.clear(); }
+        }
+        protoio::write(p.w, chunk);
+        p.closeWriter();
+    });
+    std::mutex m;
+    std::map<std::string, int> seen;
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 4; ++t) {
+        readers.emplace_back([&] {
+            std::vector<std::string> mine;
+            while (auto line = protoio::readLine(p.r)) mine.push_back(*line);
+            std::lock_guard<std::mutex> lock(m);
+            for (auto& l : mine) ++seen[l];
+        });
+    }
+    writer.join();
+    for (auto& r : readers) r.join();
+    ASSERT_EQ(seen.size(), static_cast<size_t>(kLines));
+    for (int i = 0; i < kLines; ++i) {
+        const std::string expected = "line-" + std::to_string(i) + "-" + std::string(i % 37, 'z');
+        auto it = seen.find(expected);
+        ASSERT_NE(it, seen.end()) << expected;
+        EXPECT_EQ(it->second, 1) << expected;
+    }
+}
+
+TEST(Stream, CloseWakesAThreadBlockedReadingASocket) {
+    SocketPair s;
+    std::atomic<bool> done{false};
+    std::optional<std::string> got = "unset";
+    std::thread reader([&] {
+        got = protoio::readLine(s.a);
+        done = true;
+    });
+    std::this_thread::sleep_for(150ms);
+    EXPECT_FALSE(done.load());
+    const auto start = std::chrono::steady_clock::now();
+    protoio::close(s.a);
+    reader.join();
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 2s);
+    EXPECT_EQ(got, std::nullopt);
+}
+
+TEST(Stream, AReaderAndAWriterOnOneSocketDoNotBlockEachOther) {
+    SocketPair s;
+    std::thread reader([&] { EXPECT_EQ(protoio::readLine(s.a), "late"); });
+    std::this_thread::sleep_for(50ms);
+    // The reader waits on `a` holding its read lock; a write on `a` proceeds.
+    protoio::write(s.a, "hello\n");
+    EXPECT_EQ(protoio::readLine(s.b), "hello");
+    protoio::write(s.b, "late\n");
+    reader.join();
+}
+
+TEST(Stream, WriteToAPipeWhoseReaderClosedThrowsInsteadOfSigpipe) {
+    Pipe p;
+    protoio::close(p.r);
+    p.r = -1;
+    try {
+        protoio::write(p.w, "nobody reads this");
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::FileSystem);
+        EXPECT_EQ(e.sysErrno, EPIPE);
+    }
+    // Still alive, and no SIGPIPE left pending for this thread.
+    sigset_t pending;
+    sigpending(&pending);
+    EXPECT_FALSE(sigismember(&pending, SIGPIPE));
+}
+
+TEST(Stream, WriteToASocketWhosePeerClosedThrowsNetwork) {
+    SocketPair s;
+    protoio::close(s.b);
+    try {
+        protoio::write(s.a, std::string(1 << 20, 'x'));
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::Network);
+        EXPECT_EQ(e.sysErrno, EPIPE);
+    }
+}
+
+TEST(Stream, TimeoutBoundsARead) {
+    SocketPair s;
+    protoio::setTimeout(s.a, 100);
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        protoio::readLine(s.a);
+        FAIL() << "expected ConnectionTimedOut";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::ConnectionTimedOut);
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 2s);
+    // The stream is still usable afterwards.
+    protoio::write(s.b, "ok\n");
+    EXPECT_EQ(protoio::readLine(s.a), "ok");
+}
+
+TEST(Stream, LargeTransferThroughAPipe) {
+    Pipe p;
+    std::string data;
+    for (int i = 0; i < 300000; ++i) data.push_back(static_cast<char>('a' + i % 26));
+    std::thread writer([&] { protoio::write(p.w, data); p.closeWriter(); });
+    EXPECT_EQ(protoio::readAll(p.r), data);
+    writer.join();
+}
+
+TEST(Stream, CloseTwiceIsHarmless) {
+    Pipe p;
+    protoio::close(p.w);
+    EXPECT_NO_THROW(protoio::close(p.w));
+    p.w = -1;
+}

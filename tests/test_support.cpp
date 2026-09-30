@@ -1,0 +1,117 @@
+#include "test_support.h"
+
+#include "protoio/file.h"
+#include "protoio/net.h"
+#include "protoio/stream.h"
+
+#include <openssl/err.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+
+#include <cstdlib>
+#include <stdexcept>
+#include <unistd.h>
+
+namespace protoio_test {
+
+TempDir::TempDir() {
+    std::string tmpl = protoio::file::tempDir() + "/protoio-test-XXXXXX";
+    if (!::mkdtemp(tmpl.data())) throw std::runtime_error("mkdtemp failed");
+    path = tmpl;
+}
+
+TempDir::~TempDir() {
+    try { protoio::file::remove(path, true); } catch (...) {}
+}
+
+RawServer::RawServer(std::function<void(int)> handle) : handle_(std::move(handle)) {
+    listenFd_ = protoio::net::tcpListen("127.0.0.1", 0);
+    port_ = protoio::net::sockName(listenFd_).port;
+    thread_ = std::thread([this] {
+        while (!stop_.load()) {
+            std::optional<int> c = protoio::net::tcpAccept(listenFd_, 50);
+            if (!c) continue;
+            try { handle_(*c); } catch (const std::exception&) {}
+            protoio::close(*c);
+        }
+    });
+}
+
+RawServer::~RawServer() {
+    stop_.store(true);
+    thread_.join();
+    protoio::close(listenFd_);
+}
+
+std::string RawServer::url(const std::string& path) const {
+    return "http://127.0.0.1:" + std::to_string(port_) + path;
+}
+
+HttpServer::HttpServer(HttpHandler handler)
+    : raw_([handler = std::move(handler)](int fd) {
+          protoio::setTimeout(fd, 5000);
+          protoio::http::ResponseHead response;
+          std::string body;
+          try {
+              std::optional<protoio::http::RequestHead> head = protoio::http::readRequestHead(fd);
+              if (!head) return;
+              Served req{*head, protoio::http::readBody(fd, head->headers)};
+              body = handler(req, response);
+          } catch (const protoio::http::HttpRefusal& e) {
+              response = {};
+              response.status = e.status;
+              body = protoio::http::reasonPhrase(e.status);
+          }
+          protoio::http::writeResponse(fd, response, body);
+      }) {}
+
+namespace {
+
+SSL_CTX* makeServerContext() {
+    EVP_PKEY* key = EVP_EC_gen("P-256");
+    X509* cert = X509_new();
+    X509_set_version(cert, 2);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
+    X509_gmtime_adj(X509_getm_notBefore(cert), 0);
+    X509_gmtime_adj(X509_getm_notAfter(cert), 3600);
+    X509_set_pubkey(cert, key);
+    X509_NAME* name = X509_get_subject_name(cert);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+                               reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
+    X509_set_issuer_name(cert, name);
+    X509_sign(cert, key, EVP_sha256());
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    SSL_CTX_use_certificate(ctx, cert);
+    SSL_CTX_use_PrivateKey(ctx, key);
+    X509_free(cert);
+    EVP_PKEY_free(key);
+    return ctx;
+}
+
+} // namespace
+
+TlsEchoServer::TlsEchoServer() {
+    SSL_CTX* ctx = makeServerContext();
+    ctx_ = ctx;
+    raw_ = new RawServer([ctx](int fd) {
+        SSL* ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, fd);
+        if (SSL_accept(ssl) == 1) {
+            std::string line;
+            char c;
+            while (SSL_read(ssl, &c, 1) == 1 && c != '\n') line.push_back(c);
+            const std::string reply = "echo:" + line + "\n";
+            SSL_write(ssl, reply.data(), static_cast<int>(reply.size()));
+            SSL_shutdown(ssl);
+        }
+        SSL_free(ssl);
+    });
+}
+
+TlsEchoServer::~TlsEchoServer() {
+    delete raw_;
+    SSL_CTX_free(static_cast<SSL_CTX*>(ctx_));
+}
+
+} // namespace protoio_test
