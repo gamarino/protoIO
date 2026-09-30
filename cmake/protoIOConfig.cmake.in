@@ -1,0 +1,9 @@
+# protoIO @PROJECT_VERSION@ package configuration.
+# Provides the imported target protoIO::protoio (a static library).
+include(CMakeFindDependencyMacro)
+find_dependency(OpenSSL)
+find_dependency(Threads)
+
+if(NOT TARGET protoIO::protoio)
+    include("${CMAKE_CURRENT_LIST_DIR}/protoIOTargets.cmake")
+endif()
