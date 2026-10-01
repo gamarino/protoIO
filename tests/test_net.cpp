@@ -81,6 +81,25 @@ TEST(Net, ConnectByNameAndOverIpv6Loopback) {
     protoio::close(listener);
 }
 
+// The wildcard listener ("" = every address) takes IPv4 connections on every
+// platform. On Windows it used to bind :: first, which is IPv6-only there.
+TEST(Net, WildcardListenerAcceptsIpv4Loopback) {
+    const int listener = net::tcpListen("", 0);
+    const int port = net::sockName(listener).port;
+    ASSERT_GT(port, 0);
+    std::thread server([&] {
+        auto c = net::tcpAccept(listener, 5000);
+        ASSERT_TRUE(c);
+        protoio::write(*c, "ok\n");
+        protoio::close(*c);
+    });
+    const int s = net::tcpConnect("127.0.0.1", port, 2000);
+    EXPECT_EQ(protoio::readLine(s), "ok");
+    protoio::close(s);
+    server.join();
+    protoio::close(listener);
+}
+
 TEST(Net, AcceptTimeoutAnswersNullopt) {
     const int listener = net::tcpListen("127.0.0.1", 0);
     const auto start = std::chrono::steady_clock::now();

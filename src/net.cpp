@@ -87,6 +87,24 @@ void resolve(const std::string& host, int port, int socktype, bool passive, Addr
     const std::string service = std::to_string(port);
     const int r = ::getaddrinfo(host.empty() ? nullptr : host.c_str(), service.c_str(), &hints, &out.head);
     if (r != 0) throw Error(Error::Kind::NameLookup, "cannot resolve " + host + ": " + ::gai_strerror(r));
+#ifdef _WIN32
+    // The wildcard address: glibc answers 0.0.0.0 before ::, Windows the other
+    // way round, and a Windows IPv6 socket is IPv6-only by default, so binding
+    // the first answer left 127.0.0.1 refused. Put the IPv4 answers first, as
+    // on Linux. (Every node stays in the list, so freeaddrinfo frees them all.)
+    if (passive && host.empty() && out.head) {
+        addrinfo *v4 = nullptr, **v4Tail = &v4, *rest = nullptr, **restTail = &rest;
+        for (addrinfo* ai = out.head; ai;) {
+            addrinfo* next = ai->ai_next;
+            ai->ai_next = nullptr;
+            if (ai->ai_family == AF_INET) { *v4Tail = ai; v4Tail = &ai->ai_next; }
+            else { *restTail = ai; restTail = &ai->ai_next; }
+            ai = next;
+        }
+        *v4Tail = rest;
+        out.head = v4 ? v4 : rest;
+    }
+#endif
 }
 
 Address addressOf(const sockaddr* sa) {
