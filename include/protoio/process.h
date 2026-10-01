@@ -33,7 +33,9 @@ int spawn(const std::vector<std::string>& argv);
 // Waits for a child started with spawn; answers its exit code as run does.
 int wait(int pid);
 
-// Sends `signal` to a process.
+// Sends `signal` to a process. On Windows only 0 (does the process exist?),
+// SIGTERM (15) and SIGKILL (9) are supported: the last two end the process
+// with exit code 128 + signal; any other signal throws Process (ENOSYS).
 void kill(int pid, int signal);
 
 // The environment. getenv answers std::nullopt when the variable is unset;
@@ -44,7 +46,7 @@ std::vector<std::pair<std::string, std::string>> environment();
 
 int pid();
 std::string hostName();
-// "linux", "macos" or "unix".
+// "linux", "macos", "windows" or "unix".
 std::string platform();
 
 // Flushes the C stdio streams and ends the process at once with
