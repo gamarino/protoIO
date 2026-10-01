@@ -8,7 +8,6 @@
 #include <gtest/gtest.h>
 
 #include <mutex>
-#include <sys/socket.h>
 
 using protoio::Error;
 namespace http = protoio::http;
@@ -39,11 +38,9 @@ struct Wire {
     int fd = -1, peer = -1;
     explicit Wire(const std::string& bytes, bool closePeer = true) {
         int s[2];
-        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) != 0) throw std::runtime_error("socketpair");
+        protoio_test::socketPair(s);
         fd = s[0];
         peer = s[1];
-        protoio::forget(fd);
-        protoio::forget(peer);
         protoio::write(peer, bytes);
         if (closePeer) { protoio::close(peer); peer = -1; }
     }

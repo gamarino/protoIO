@@ -8,30 +8,87 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 using protoio::Error;
 namespace process = protoio::process;
 
+// The commands the tests run: POSIX ones, or on Windows the test child
+// program (tests/testchild.cpp) standing in for them.
+#ifdef _WIN32
+const std::vector<std::string> kCat = {PROTOIO_TESTCHILD, "cat"};
+const std::vector<std::string> kTrue = {PROTOIO_TESTCHILD, "true"};
+const std::vector<std::string> kSleep30 = {PROTOIO_TESTCHILD, "sleep", "30000"};
+constexpr int kSigKill = 9;
+#else
+const std::vector<std::string> kCat = {"cat"};
+const std::vector<std::string> kTrue = {"true"};
+const std::vector<std::string> kSleep30 = {"sleep", "30"};
+constexpr int kSigKill = SIGKILL;
+#endif
+
 TEST(Process, RunCollectsOutputsAndExitCode) {
+#ifdef _WIN32
+    auto r = process::run({PROTOIO_TESTCHILD, "print", "out", "err", "3"});
+#else
     auto r = process::run({"sh", "-c", "printf out; printf err >&2; exit 3"});
+#endif
     EXPECT_EQ(r.exitCode, 3);
     EXPECT_EQ(r.out, "out");
     EXPECT_EQ(r.err, "err");
 }
 
+#ifdef _WIN32
+TEST(Process, RunSearchesPathOnWindows) {
+    // "cmd" is found without its directory or its ".exe".
+    auto r = process::run({"cmd", "/c", "exit 3"});
+    EXPECT_EQ(r.exitCode, 3);
+}
+
+TEST(Process, ArgumentsArriveUnchangedOnWindows) {
+    // The command line is quoted so that the child's C runtime rebuilds the
+    // same argv: spaces, quotes, backslashes before quotes and at the end.
+    const std::vector<std::string> args = {"plain", "two words", "", "quo\"te", "back\\slash",
+                                           "trail\\", "both \\\" x", "tab\there"};
+    std::vector<std::string> argv = {PROTOIO_TESTCHILD, "args"};
+    argv.insert(argv.end(), args.begin(), args.end());
+    auto r = process::run(argv);
+    std::string expected;
+    for (const std::string& a : args) expected += "[" + a + "]\n";
+    EXPECT_EQ(r.out, expected);
+}
+
+TEST(Process, UnsupportedSignalsThrowOnWindows) {
+    int pid = process::spawn(kSleep30);
+    try {
+        process::kill(pid, SIGINT);
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::Process);
+        EXPECT_EQ(e.sysErrno, ENOSYS);
+    }
+    process::kill(pid, 0);  // still there
+    process::kill(pid, kSigKill);
+    EXPECT_EQ(process::wait(pid), 128 + kSigKill);
+}
+#endif
+
 TEST(Process, RunFeedsInput) {
-    auto r = process::run({"cat"}, std::string("hello\nworld\n"));
+    auto r = process::run(kCat, std::string("hello\nworld\n"));
     EXPECT_EQ(r.exitCode, 0);
     EXPECT_EQ(r.out, "hello\nworld\n");
     // Without input, the child's stdin is closed at once.
-    auto r2 = process::run({"cat"});
+    auto r2 = process::run(kCat);
     EXPECT_EQ(r2.out, "");
 }
 
 TEST(Process, RunLargeOutputAndInputDoNotDeadlock) {
     const std::string big(3 * 1024 * 1024, 'q');
-    auto r = process::run({"cat"}, big);
+    auto r = process::run(kCat, big);
     EXPECT_EQ(r.exitCode, 0);
     EXPECT_EQ(r.out.size(), big.size());
 }
@@ -39,16 +96,25 @@ TEST(Process, RunLargeOutputAndInputDoNotDeadlock) {
 TEST(Process, AChildThatIgnoresItsInputDoesNotKillTheCaller) {
     // `true` exits without reading: writing 2 MB to it would raise SIGPIPE.
     const std::string input(2 * 1024 * 1024, 'x');
-    auto r = process::run({"true"}, input);
+    auto r = process::run(kTrue, input);
     EXPECT_EQ(r.exitCode, 0);
+#ifndef _WIN32
     sigset_t pending;
     sigpending(&pending);
     EXPECT_FALSE(sigismember(&pending, SIGPIPE));
+#endif
 }
 
 TEST(Process, ASignalGivesExitCode128PlusSignal) {
+#ifdef _WIN32
+    // No process can signal itself on Windows: the test kills a child.
+    int pid = process::spawn(kSleep30);
+    process::kill(pid, SIGTERM);
+    EXPECT_EQ(process::wait(pid), 128 + SIGTERM);
+#else
     auto r = process::run({"sh", "-c", "kill -TERM $$"});
     EXPECT_EQ(r.exitCode, 128 + SIGTERM);
+#endif
 }
 
 TEST(Process, AMissingCommandThrowsProcess) {
@@ -64,13 +130,17 @@ TEST(Process, AMissingCommandThrowsProcess) {
 }
 
 TEST(Process, SpawnWaitKill) {
+#ifdef _WIN32
+    int pid = process::spawn({"cmd", "/c", "exit 7"});
+#else
     int pid = process::spawn({"sh", "-c", "exit 7"});
+#endif
     EXPECT_GT(pid, 0);
     EXPECT_EQ(process::wait(pid), 7);
 
-    int sleeper = process::spawn({"sleep", "30"});
-    process::kill(sleeper, SIGKILL);
-    EXPECT_EQ(process::wait(sleeper), 128 + SIGKILL);
+    int sleeper = process::spawn(kSleep30);
+    process::kill(sleeper, kSigKill);
+    EXPECT_EQ(process::wait(sleeper), 128 + kSigKill);
 
     try {
         process::wait(sleeper);  // already reaped
@@ -88,7 +158,7 @@ TEST(Process, ConcurrentRuns) {
         ts.emplace_back([&, i] {
             for (int k = 0; k < 5; ++k) {
                 const std::string in = "t" + std::to_string(i) + "-" + std::to_string(k);
-                auto r = process::run({"cat"}, in);
+                auto r = process::run(kCat, in);
                 if (r.exitCode == 0 && r.out == in) ++ok;
             }
         });
@@ -104,17 +174,27 @@ TEST(Process, Environment) {
     for (auto& [k, v] : process::environment())
         if (k == "PROTOIO_TEST_VAR") { found = true; EXPECT_EQ(v, "v=1"); }
     EXPECT_TRUE(found);
+#ifdef _WIN32
+    auto r = process::run({PROTOIO_TESTCHILD, "env", "PROTOIO_TEST_VAR"});
+#else
     auto r = process::run({"sh", "-c", "printf %s \"$PROTOIO_TEST_VAR\""});
+#endif
     EXPECT_EQ(r.out, "v=1");
     process::setenv("PROTOIO_TEST_VAR", std::nullopt);
     EXPECT_EQ(process::getenv("PROTOIO_TEST_VAR"), std::nullopt);
 }
 
 TEST(Process, Identity) {
+#ifdef _WIN32
+    EXPECT_EQ(process::pid(), ::_getpid());
+#else
     EXPECT_EQ(process::pid(), ::getpid());
+#endif
     EXPECT_FALSE(process::hostName().empty());
 #if defined(__linux__)
     EXPECT_EQ(process::platform(), "linux");
+#elif defined(_WIN32)
+    EXPECT_EQ(process::platform(), "windows");
 #endif
 }
 

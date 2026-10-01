@@ -52,6 +52,26 @@ TEST(Net, TcpConnectListenAcceptEcho) {
 }
 
 TEST(Net, ConnectByNameAndOverIpv6Loopback) {
+#ifdef _WIN32
+    // Some Windows hosts (VPN or security software) drop all traffic to ::1,
+    // where "localhost" resolves first; nothing can connect there.
+    try {
+        const int probe = net::tcpListen("::1", 0);
+        const int port = net::sockName(probe).port;
+        std::thread t([&] { if (auto c = net::tcpAccept(probe, 3000)) protoio::close(*c); });
+        try {
+            protoio::close(net::tcpConnect("::1", port, 1000));
+        } catch (const Error&) {
+            protoio::close(probe);  // wakes the acceptor
+            t.join();
+            GTEST_SKIP() << "the IPv6 loopback address ::1 does not answer on this host";
+        }
+        t.join();
+        protoio::close(probe);
+    } catch (const Error& e) {
+        GTEST_SKIP() << "no IPv6 loopback: " << e.what();
+    }
+#endif
     const int listener = net::tcpListen("localhost", 0);
     const int port = net::sockName(listener).port;
     std::thread server([&] { if (auto c = net::tcpAccept(listener, 5000)) protoio::close(*c); });

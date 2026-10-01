@@ -6,7 +6,14 @@
 
 #include <gtest/gtest.h>
 
+#ifdef _WIN32
+#include <algorithm>
+#include <filesystem>
+#include <io.h>
+#include "protoio/process.h"
+#else
 #include <unistd.h>
+#endif
 
 using protoio::Error;
 namespace file = protoio::file;
@@ -37,6 +44,18 @@ TEST(File, WriteReadAppend) {
     EXPECT_EQ(file::read(f), "replaced");
     file::write(f, std::string("\0\x01\xff", 3));
     EXPECT_EQ(file::read(f), std::string("\0\x01\xff", 3));
+}
+
+TEST(File, NonAsciiNamesAreUtf8) {
+    TempDir d;
+    const std::string name = "\xC3\xB1" "and\xC3\xBA-\xE2\x82\xAC.txt";  // "ñandú-€.txt"
+    file::write(d / name, "x");
+    EXPECT_EQ(file::read(d / name), "x");
+    EXPECT_EQ(file::list(d.path), std::vector<std::string>{name});
+    ASSERT_TRUE(file::stat(d / name));
+    EXPECT_TRUE(file::stat(d / name)->isFile);
+    file::move(d / name, d / ("dir-" + name));
+    EXPECT_EQ(file::read(d / ("dir-" + name)), "x");
 }
 
 TEST(File, ErrorsMapToKinds) {
@@ -96,6 +115,34 @@ TEST(File, DirectoriesListRemoveCopyMove) {
     EXPECT_FALSE(file::stat(d / "x"));
 }
 
+#ifdef _WIN32
+// absolute answers native separators on Windows.
+std::string native(std::string s) {
+    std::replace(s.begin(), s.end(), '/', '\\');
+    return s;
+}
+
+TEST(File, AbsoluteIsLexicalAndKeepsSymlinks) {
+    TempDir d;
+    file::mkdir(d / "real/sub", true);
+    // A symbolic link needs a privilege (or developer mode); a junction,
+    // which absolute must not resolve either, does not.
+    std::error_code ec;
+    std::filesystem::create_directory_symlink(d / "real", d / "link", ec);  // ASCII paths
+    if (ec) {
+        auto r = protoio::process::run({"cmd", "/c", "mklink", "/J", native(d / "link"), native(d / "real")});
+        ASSERT_EQ(r.exitCode, 0) << r.out << r.err;
+    }
+    // "link/sub/.." folds to "link", not to the link's target.
+    EXPECT_EQ(file::absolute(d / "link/sub/.."), native(d / "link"));
+    EXPECT_EQ(file::absolute(d / "link/./sub/"), native(d / "link/sub"));
+    const std::string root = file::absolute("/");
+    EXPECT_EQ(root.size(), 3u) << root;  // e.g. "C:\"
+    EXPECT_EQ(root.substr(1), ":\\");
+    const std::string here = file::cwd();
+    EXPECT_EQ(file::absolute("rel/x"), here + "\\rel\\x");
+}
+#else
 TEST(File, AbsoluteIsLexicalAndKeepsSymlinks) {
     TempDir d;
     file::mkdir(d / "real/sub", true);
@@ -107,13 +154,18 @@ TEST(File, AbsoluteIsLexicalAndKeepsSymlinks) {
     const std::string here = file::cwd();
     EXPECT_EQ(file::absolute("rel/x"), here + "/rel/x");
 }
+#endif
 
 TEST(File, CwdAndChdir) {
     TempDir d;
     const std::string before = file::cwd();
     file::chdir(d.path);
+#ifdef _WIN32
+    EXPECT_EQ(file::cwd(), file::absolute(d.path));
+#else
     // The temporary directory may itself sit behind a symbolic link.
     EXPECT_EQ(file::cwd(), [&] { char b[4096]; return std::string(::realpath(d.path.c_str(), b)); }());
+#endif
     file::chdir(before);
     EXPECT_EQ(file::cwd(), before);
     EXPECT_FALSE(file::tempDir().empty());
@@ -139,7 +191,11 @@ TEST(File, ReopenedNumberStartsWithAFreshBuffer) {
     file::write(d / "two", "2a\n");
     int r = file::open(d / "one", file::Mode::Read);
     EXPECT_EQ(protoio::readLine(r), "1a");  // "1b" stays buffered
+#ifdef _WIN32
+    ::_close(r);  // closed behind the library's back: its state for `r` is stale
+#else
     ::close(r);  // closed behind the library's back: its state for `r` is stale
+#endif
     int r2 = file::open(d / "two", file::Mode::Read);
     ASSERT_EQ(r2, r) << "the lowest free number is reused";
     EXPECT_EQ(protoio::readLine(r2), "2a");

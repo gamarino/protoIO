@@ -11,15 +11,54 @@
 
 #include <cstdlib>
 #include <stdexcept>
+
+#ifdef _WIN32
+#include <random>
+#else
+#include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 namespace protoio_test {
+
+#ifdef _WIN32
+void socketPair(int fds[2]) {
+    const int listener = protoio::net::tcpListen("127.0.0.1", 0);
+    const int port = protoio::net::sockName(listener).port;
+    fds[0] = protoio::net::tcpConnect("127.0.0.1", port, 5000);
+    std::optional<int> b = protoio::net::tcpAccept(listener, 5000);
+    protoio::close(listener);
+    if (!b) throw std::runtime_error("socketPair: no connection");
+    fds[1] = *b;
+}
+
+TempDir::TempDir() {
+    std::random_device rd;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const std::string candidate = protoio::file::tempDir() + "/protoio-test-" + std::to_string(rd());
+        try {
+            protoio::file::mkdir(candidate);
+            path = candidate;
+            return;
+        } catch (const protoio::Error& e) {
+            if (e.kind != protoio::Error::Kind::FileExists) throw;
+        }
+    }
+    throw std::runtime_error("cannot create a temporary directory");
+}
+#else
+void socketPair(int fds[2]) {
+    if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) throw std::runtime_error("socketpair");
+    protoio::forget(fds[0]);
+    protoio::forget(fds[1]);
+}
 
 TempDir::TempDir() {
     std::string tmpl = protoio::file::tempDir() + "/protoio-test-XXXXXX";
     if (!::mkdtemp(tmpl.data())) throw std::runtime_error("mkdtemp failed");
     path = tmpl;
 }
+#endif
 
 TempDir::~TempDir() {
     try { protoio::file::remove(path, true); } catch (...) {}
@@ -96,7 +135,11 @@ TlsEchoServer::TlsEchoServer() {
     ctx_ = ctx;
     raw_ = new RawServer([ctx](int fd) {
         SSL* ssl = SSL_new(ctx);
+#ifdef _WIN32
+        SSL_set_fd(ssl, static_cast<int>(protoio::net::nativeSocket(fd)));
+#else
         SSL_set_fd(ssl, fd);
+#endif
         if (SSL_accept(ssl) == 1) {
             std::string line;
             char c;

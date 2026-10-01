@@ -2,6 +2,7 @@
 // readers, close waking a blocked reader, and writes that never raise SIGPIPE.
 #include "protoio/error.h"
 #include "protoio/stream.h"
+#include "test_support.h"
 
 #include <gtest/gtest.h>
 
@@ -11,8 +12,13 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#else
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 using protoio::Error;
 using namespace std::chrono_literals;
@@ -23,7 +29,11 @@ struct Pipe {
     int r = -1, w = -1;
     Pipe() {
         int p[2];
+#ifdef _WIN32
+        if (::_pipe(p, 65536, _O_BINARY | _O_NOINHERIT) != 0) throw std::runtime_error("pipe");
+#else
         if (::pipe(p) != 0) throw std::runtime_error("pipe");
+#endif
         r = p[0];
         w = p[1];
         protoio::forget(r);
@@ -40,11 +50,9 @@ struct SocketPair {
     int a = -1, b = -1;
     SocketPair() {
         int s[2];
-        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, s) != 0) throw std::runtime_error("socketpair");
+        protoio_test::socketPair(s);
         a = s[0];
         b = s[1];
-        protoio::forget(a);
-        protoio::forget(b);
     }
     ~SocketPair() {
         protoio::close(a);
@@ -209,21 +217,37 @@ TEST(Stream, WriteToAPipeWhoseReaderClosedThrowsInsteadOfSigpipe) {
         EXPECT_EQ(e.kind, Error::Kind::FileSystem);
         EXPECT_EQ(e.sysErrno, EPIPE);
     }
+#ifndef _WIN32
     // Still alive, and no SIGPIPE left pending for this thread.
     sigset_t pending;
     sigpending(&pending);
     EXPECT_FALSE(sigismember(&pending, SIGPIPE));
+#endif
 }
 
 TEST(Stream, WriteToASocketWhosePeerClosedThrowsNetwork) {
     SocketPair s;
     protoio::close(s.b);
     try {
+#ifdef _WIN32
+        // The peer is a TCP socket there (socketPair): the first write may
+        // still be accepted, the peer's reset fails a later one.
+        for (int i = 0; i < 100; ++i) {
+            protoio::write(s.a, std::string(1 << 20, 'x'));
+            std::this_thread::sleep_for(10ms);
+        }
+#else
         protoio::write(s.a, std::string(1 << 20, 'x'));
+#endif
         FAIL() << "expected an Error";
     } catch (const Error& e) {
         EXPECT_EQ(e.kind, Error::Kind::Network);
+#ifdef _WIN32
+        // Winsock reports the peer's reset rather than a broken pipe.
+        EXPECT_TRUE(e.sysErrno == EPIPE || e.sysErrno == ECONNRESET || e.sysErrno == ECONNABORTED) << e.what();
+#else
         EXPECT_EQ(e.sysErrno, EPIPE);
+#endif
     }
 }
 
@@ -241,6 +265,23 @@ TEST(Stream, TimeoutBoundsARead) {
     // The stream is still usable afterwards.
     protoio::write(s.b, "ok\n");
     EXPECT_EQ(protoio::readLine(s.a), "ok");
+}
+
+TEST(Stream, TimeoutBoundsAPipeRead) {
+    Pipe p;
+    protoio::setTimeout(p.r, 100);
+    const auto start = std::chrono::steady_clock::now();
+    try {
+        protoio::readLine(p.r);
+        FAIL() << "expected a time-out";
+    } catch (const Error& e) {
+        // A pipe is not a socket: the kind is FileSystem, the cause ETIMEDOUT.
+        EXPECT_EQ(e.kind, Error::Kind::FileSystem);
+        EXPECT_EQ(e.sysErrno, ETIMEDOUT);
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 2s);
+    protoio::write(p.w, "ok\n");
+    EXPECT_EQ(protoio::readLine(p.r), "ok");
 }
 
 TEST(Stream, LargeTransferThroughAPipe) {

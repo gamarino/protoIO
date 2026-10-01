@@ -11,6 +11,11 @@
 
 namespace protoio_test {
 
+// A connected pair of stream sockets, both registered with no state:
+// socketpair(2) on POSIX; on Windows, which has none, a loopback TCP
+// connection.
+void socketPair(int fds[2]);
+
 // A fresh directory under the system's temporary directory, removed with
 // everything in it when the object goes away.
 struct TempDir {
