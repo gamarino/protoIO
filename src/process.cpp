@@ -7,6 +7,7 @@
 
 #include "protoio/error.h"
 #include "protoio/stream.h"
+#include "internal.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -50,7 +51,7 @@ std::vector<char*> argvOf(const std::vector<std::string>& argv, const char* who)
 RunResult run(const std::vector<std::string>& argv, const std::optional<std::string>& input) {
     std::vector<char*> args = argvOf(argv, "run");
     int inP[2] = {-1, -1}, outP[2] = {-1, -1}, errP[2] = {-1, -1};
-    if (::pipe2(inP, O_CLOEXEC) || ::pipe2(outP, O_CLOEXEC) || ::pipe2(errP, O_CLOEXEC)) {
+    if (detail::newPipe(inP) || detail::newPipe(outP) || detail::newPipe(errP)) {
         const int e = errno;
         for (int f : {inP[0], inP[1], outP[0], outP[1], errP[0], errP[1]}) if (f >= 0) ::close(f);
         processError("cannot create pipes", e);

@@ -433,7 +433,7 @@ int tcpConnect(const std::string& host, int port, int timeoutMs) {
     int fd = -1;
     int lastErr = ECONNREFUSED;
     for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
-        fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC | SOCK_NONBLOCK, ai->ai_protocol);
+        fd = detail::newSocket(ai->ai_family, ai->ai_socktype, ai->ai_protocol, true);
         if (fd < 0) { lastErr = errno; continue; }
         int rc = ::connect(fd, ai->ai_addr, ai->ai_addrlen);
         if (rc != 0 && errno == EINPROGRESS) {
@@ -465,7 +465,7 @@ int tcpListen(const std::string& host, int port, int backlog) {
     resolve(host, port, SOCK_STREAM, true, addrs);
     int fd = -1, lastErr = EADDRNOTAVAIL;
     for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
-        fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+        fd = detail::newSocket(ai->ai_family, ai->ai_socktype, ai->ai_protocol, false);
         if (fd < 0) { lastErr = errno; continue; }
         int one = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -491,7 +491,7 @@ std::optional<int> tcpAccept(int fd, int timeoutMs) {
     for (;;) {
         if (!detail::waitReady(fd, POLLIN, deadline.remaining())) return std::nullopt;
         if (st->closed.load()) return std::nullopt;
-        const int c = ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC);
+        const int c = detail::acceptSocket(fd);
         if (c >= 0) {
             noDelay(c);
             protoio::forget(c);
@@ -545,7 +545,7 @@ int udpBind(const std::string& host, int port) {
     resolve(host.empty() ? "0.0.0.0" : host, port, SOCK_DGRAM, true, addrs);
     int fd = -1, lastErr = EADDRNOTAVAIL;
     for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
-        fd = ::socket(ai->ai_family, ai->ai_socktype | SOCK_CLOEXEC, ai->ai_protocol);
+        fd = detail::newSocket(ai->ai_family, ai->ai_socktype, ai->ai_protocol, false);
         if (fd < 0) { lastErr = errno; continue; }
         int one = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -572,7 +572,7 @@ void udpSend(int fd, const std::string& host, int port, std::string_view data) {
     AddrList addrs;
     resolve(host, port, SOCK_DGRAM, false, addrs, family);
     ssize_t n;
-    while ((n = ::sendto(fd, data.data(), data.size(), MSG_NOSIGNAL, addrs.head->ai_addr,
+    while ((n = ::sendto(fd, data.data(), data.size(), detail::kNoSigpipe, addrs.head->ai_addr,
                          addrs.head->ai_addrlen)) < 0 && errno == EINTR) {}
     if (n < 0) netError(errno, "send to " + host);
 }

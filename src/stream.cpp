@@ -63,8 +63,15 @@ SigpipeGuard::~SigpipeGuard() {
         if (sigismember(&pending, SIGPIPE)) {
             sigemptyset(&only);
             sigaddset(&only, SIGPIPE);
+#if defined(__APPLE__)
+            // No sigtimedwait on macOS; the signal is pending, so sigwait
+            // returns at once.
+            int sig = 0;
+            sigwait(&only, &sig);
+#else
             const timespec zero{0, 0};
             while (sigtimedwait(&only, nullptr, &zero) < 0 && errno == EINTR) {}
+#endif
         }
     }
     pthread_sigmask(SIG_SETMASK, &old_, nullptr);
@@ -260,7 +267,7 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
             }
 #else
             if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
-            w = st.isSocket ? ::send(st.fd, data + done, size - done, MSG_NOSIGNAL)
+            w = st.isSocket ? ::send(st.fd, data + done, size - done, detail::kNoSigpipe)
                             : ::write(st.fd, data + done, size - done);
             if (w < 0) {
                 if (errno == EINTR) continue;

@@ -1,0 +1,76 @@
+name: CI
+
+# Builds protoIO and runs its GoogleTest suite on Linux, macOS and Windows on
+# every push and pull request. protoIO has no sibling dependencies: OpenSSL is
+# its only library, from the distribution (Linux), Homebrew (macOS) or the
+# runner image (Windows).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux (GCC)
+            os: ubuntu-24.04
+          - name: macOS (Apple clang, arm64)
+            os: macos-14
+          - name: Windows (MSVC, x64)
+            os: windows-2022
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev ninja-build
+
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew list openssl@3 >/dev/null 2>&1 || brew install openssl@3
+          brew list ninja >/dev/null 2>&1 || brew install ninja
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          for d in "C:/Program Files/OpenSSL" "C:/Program Files/OpenSSL-Win64"; do
+            if [ -f "$d/include/openssl/ssl.h" ]; then echo "OPENSSL_ROOT_DIR=$d" >> "$GITHUB_ENV"; break; fi
+          done
+
+      - name: MSVC environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake -B build -S . -G Ninja -DCMAKE_BUILD_TYPE=Release ${OPENSSL_ROOT_DIR:+"-DOPENSSL_ROOT_DIR=$OPENSSL_ROOT_DIR"}
+
+      - name: Build
+        run: cmake --build build --parallel 4
+
+      - name: Test suite
+        run: ctest --test-dir build -j2 --output-on-failure --timeout 300 < /dev/null
+
+      - name: Install
+        run: cmake --install build --prefix "$RUNNER_TEMP/protoIO-prefix"

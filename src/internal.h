@@ -17,6 +17,62 @@
 #else
 #include <poll.h>
 #include <sys/types.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
+#ifndef _WIN32
+namespace protoio::detail {
+// Descriptors are created close-on-exec, and sockets never raise SIGPIPE.
+// Linux (and the BSDs) do the first atomically with SOCK_CLOEXEC, accept4 and
+// pipe2, and the second per call with MSG_NOSIGNAL; these are exactly the calls
+// made there. macOS has none of the four: the flags are set right after the
+// descriptor is created, and SIGPIPE is turned off per socket (SO_NOSIGPIPE).
+#if defined(SOCK_CLOEXEC)
+inline int newSocket(int family, int type, int protocol, bool nonBlocking) {
+    return ::socket(family, type | SOCK_CLOEXEC | (nonBlocking ? SOCK_NONBLOCK : 0), protocol);
+}
+inline int acceptSocket(int fd) { return ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC); }
+inline int newPipe(int fds[2]) { return ::pipe2(fds, O_CLOEXEC); }
+inline constexpr int kNoSigpipe = MSG_NOSIGNAL;
+#else
+inline void noSigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    const int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#else
+    (void)fd;
+#endif
+}
+inline int newSocket(int family, int type, int protocol, bool nonBlocking) {
+    const int fd = ::socket(family, type, protocol);
+    if (fd < 0) return fd;
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    if (nonBlocking) ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+    noSigpipe(fd);
+    return fd;
+}
+inline int acceptSocket(int fd) {
+    const int c = ::accept(fd, nullptr, nullptr);
+    if (c < 0) return c;
+    ::fcntl(c, F_SETFD, FD_CLOEXEC);
+    // A BSD accept inherits O_NONBLOCK from the listening socket, which is
+    // non-blocking (tcpListen); Linux's accept4 does not, and callers expect a
+    // blocking connection.
+    ::fcntl(c, F_SETFL, ::fcntl(c, F_GETFL) & ~O_NONBLOCK);
+    noSigpipe(c);
+    return c;
+}
+inline int newPipe(int fds[2]) {
+    if (::pipe(fds) != 0) return -1;
+    ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+}
+inline constexpr int kNoSigpipe = 0;
+#endif
+} // namespace protoio::detail
 #endif
 
 typedef struct ssl_st SSL;

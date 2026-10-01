@@ -86,7 +86,11 @@ std::optional<Stat> stat(const std::string& path) {
     s.isFile = S_ISREG(st.st_mode);
     s.isDirectory = S_ISDIR(st.st_mode);
     s.size = static_cast<std::int64_t>(st.st_size);
+    #if defined(__APPLE__)
+    s.modifiedMs = static_cast<std::int64_t>(st.st_mtimespec.tv_sec) * 1000 + st.st_mtimespec.tv_nsec / 1000000;
+#else
     s.modifiedMs = static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1000 + st.st_mtim.tv_nsec / 1000000;
+#endif
     s.readable = ::access(path.c_str(), R_OK) == 0;
     s.writable = ::access(path.c_str(), W_OK) == 0;
     return s;

@@ -15,6 +15,7 @@
 #ifdef _WIN32
 #include <random>
 #else
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -48,7 +49,17 @@ TempDir::TempDir() {
 }
 #else
 void socketPair(int fds[2]) {
+#if defined(SOCK_CLOEXEC)
     if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) throw std::runtime_error("socketpair");
+#else
+    // macOS: no SOCK_CLOEXEC, and SIGPIPE is turned off per socket (needs <fcntl.h>).
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) throw std::runtime_error("socketpair");
+    for (int i = 0; i < 2; ++i) {
+        ::fcntl(fds[i], F_SETFD, FD_CLOEXEC);
+        const int one = 1;
+        ::setsockopt(fds[i], SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+    }
+#endif
     protoio::forget(fds[0]);
     protoio::forget(fds[1]);
 }
