@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Gustavo Marino <gamarino@gmail.com>. MIT licensed.
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -62,5 +63,14 @@ struct Datagram {
 // The next datagram (at most 65536 bytes), or std::nullopt when `timeoutMs`
 // elapsed first or the socket was closed meanwhile.
 std::optional<Datagram> udpReceive(int fd, int timeoutMs = -1);
+
+#ifdef _WIN32
+// Windows only: the SOCKET behind a socket descriptor of the library (a
+// SOCKET is not a C runtime descriptor, so the library numbers its sockets
+// itself), for calls the library does not offer (setsockopt, a TLS server's
+// SSL_set_fd, ...). The library still owns it: close it with protoio::close.
+// Throws Network (ENOTSOCK) for a descriptor that is not one of its sockets.
+std::uintptr_t nativeSocket(int fd);
+#endif
 
 } // namespace protoio::net

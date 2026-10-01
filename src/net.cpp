@@ -12,6 +12,10 @@
 #include <chrono>
 #include <cstring>
 
+#ifdef _WIN32
+#include <mstcpip.h>
+#include <mswsock.h>
+#else
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -19,6 +23,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -72,6 +77,9 @@ struct AddrList {
 // Resolves host:port. Throws NameLookup.
 void resolve(const std::string& host, int port, int socktype, bool passive, AddrList& out,
              int family = AF_UNSPEC) {
+#ifdef _WIN32
+    detail::win::initWinsock();
+#endif
     addrinfo hints{};
     hints.ai_family = family;
     hints.ai_socktype = socktype;
@@ -119,6 +127,51 @@ private:
     std::chrono::steady_clock::time_point end_;
 };
 
+#ifdef _WIN32
+namespace win = detail::win;
+
+// The socket behind a descriptor; Network (ENOTSOCK) when it is none.
+SOCKET native(int fd) {
+    const SOCKET s = win::socketOf(fd);
+    if (s == INVALID_SOCKET) netError(ENOTSOCK, "descriptor " + std::to_string(fd));
+    return s;
+}
+
+int lastErrno() { return win::errnoOfWsa(::WSAGetLastError()); }
+
+// A socket as socket(2) with SOCK_CLOEXEC makes one: not inheritable.
+SOCKET newSocket(const addrinfo* ai) {
+    return ::WSASocketW(ai->ai_family, ai->ai_socktype, ai->ai_protocol, nullptr, 0,
+                        WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
+}
+
+void noDelay(SOCKET s) {
+    const BOOL one = TRUE;
+    ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof one);
+}
+
+bool isLoopback(const sockaddr* sa) {
+    if (sa->sa_family == AF_INET)
+        return (ntohl(reinterpret_cast<const sockaddr_in*>(sa)->sin_addr.s_addr) >> 24) == 127;
+    if (sa->sa_family == AF_INET6) return IN6_IS_ADDR_LOOPBACK(&reinterpret_cast<const sockaddr_in6*>(sa)->sin6_addr);
+    return false;
+}
+
+void setFlag(SOCKET s, int option) {
+    const BOOL one = TRUE;
+    ::setsockopt(s, SOL_SOCKET, option, reinterpret_cast<const char*>(&one), sizeof one);
+}
+
+Address nameOf(int fd, bool peer) {
+    const SOCKET s = native(fd);
+    sockaddr_storage ss{};
+    int len = sizeof ss;
+    const int rc = peer ? ::getpeername(s, reinterpret_cast<sockaddr*>(&ss), &len)
+                        : ::getsockname(s, reinterpret_cast<sockaddr*>(&ss), &len);
+    if (rc != 0) netError(lastErrno(), "address of socket");
+    return addressOf(reinterpret_cast<sockaddr*>(&ss));
+}
+#else
 void noDelay(int fd) {
     int one = 1;
     ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
@@ -132,8 +185,246 @@ Address nameOf(int fd, bool peer) {
     if (rc != 0) netError(errno, "address of socket");
     return addressOf(reinterpret_cast<sockaddr*>(&ss));
 }
+#endif
 
 } // namespace
+
+#ifdef _WIN32
+// ------------------------------------------------------------------ Windows
+//
+// The same contracts as the POSIX functions below, on Winsock: sockets are
+// registered descriptors (platform_win.h), EINPROGRESS is WSAEWOULDBLOCK,
+// accept4 and MSG_DONTWAIT do not exist (the listening and UDP sockets are
+// non-blocking instead), and closing a socket does not wake a waiting thread
+// (waitReady watches the descriptor's `closed` flag instead).
+
+int tcpConnect(const std::string& host, int port, int timeoutMs) {
+    checkPort(port);
+    AddrList addrs;
+    resolve(host, port, SOCK_STREAM, false, addrs);
+    SOCKET s = INVALID_SOCKET;
+    int lastErr = ECONNREFUSED;
+    for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
+        s = newSocket(ai);
+        if (s == INVALID_SOCKET) { lastErr = lastErrno(); continue; }
+        win::setNonBlocking(s, true);
+        if (isLoopback(ai->ai_addr)) {
+            // Windows answers a refused connection (a RST) by sending the SYN
+            // again, twice, so it fails only after about two seconds, where
+            // POSIX fails at once. On the loopback interface nothing is lost
+            // in transit, so the retries are switched off there.
+            TCP_INITIAL_RTO_PARAMETERS rto{TCP_INITIAL_RTO_UNSPECIFIED_RTT, TCP_INITIAL_RTO_NO_SYN_RETRANSMISSIONS};
+            DWORD got = 0;
+            ::WSAIoctl(s, SIO_TCP_INITIAL_RTO, &rto, sizeof rto, nullptr, 0, &got, nullptr, nullptr);
+        }
+        int err = 0;
+        if (::connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) != 0) {
+            err = ::WSAGetLastError();
+            if (err == WSAEWOULDBLOCK) {
+                // select, not WSAPoll: it reports a failed connect reliably.
+                fd_set w, x;
+                FD_ZERO(&w);
+                FD_ZERO(&x);
+                FD_SET(s, &w);
+                FD_SET(s, &x);
+                timeval tv{timeoutMs / 1000, (timeoutMs % 1000) * 1000};
+                const int pr = ::select(0, nullptr, &w, &x, timeoutMs < 0 ? nullptr : &tv);
+                if (pr == 0) {
+                    err = WSAETIMEDOUT;
+                } else if (pr < 0) {
+                    err = ::WSAGetLastError();
+                } else {
+                    int soErr = 0;
+                    int len = sizeof soErr;
+                    ::getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soErr), &len);
+                    err = soErr;
+                }
+            }
+        }
+        if (err == 0) break;
+        lastErr = win::errnoOfWsa(err);
+        ::closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    if (s == INVALID_SOCKET) netError(lastErr, "cannot connect to " + host + ":" + std::to_string(port));
+    win::setNonBlocking(s, false);
+    noDelay(s);
+    const int fd = win::registerSocket(s);
+    protoio::forget(fd);
+    return fd;
+}
+
+int tcpListen(const std::string& host, int port, int backlog) {
+    checkPort(port);
+    AddrList addrs;
+    resolve(host, port, SOCK_STREAM, true, addrs);
+    SOCKET s = INVALID_SOCKET;
+    int lastErr = EADDRNOTAVAIL;
+    for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
+        s = newSocket(ai);
+        if (s == INVALID_SOCKET) { lastErr = lastErrno(); continue; }
+        // No SO_REUSEADDR: on Windows it lets a second socket bind a port in
+        // use, and without it a port whose old connections linger in
+        // TIME_WAIT can already be listened on again.
+        if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 && ::listen(s, backlog) == 0) {
+            win::setNonBlocking(s, true);  // see tcpAccept
+            break;
+        }
+        lastErr = lastErrno();
+        ::closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    if (s == INVALID_SOCKET) netError(lastErr, "cannot listen on port " + std::to_string(port));
+    const int fd = win::registerSocket(s);
+    protoio::forget(fd);
+    return fd;
+}
+
+std::optional<int> tcpAccept(int fd, int timeoutMs) {
+    auto st = detail::fdState(fd);  // held: a concurrent close cannot free the socket under us
+    const SOCKET ls = native(fd);
+    Deadline deadline(timeoutMs);
+    for (;;) {
+        if (!detail::waitReady(fd, POLLIN, deadline.remaining(), &st->closed)) return std::nullopt;
+        if (st->closed.load()) return std::nullopt;
+        const SOCKET c = ::accept(ls, nullptr, nullptr);
+        if (c != INVALID_SOCKET) {
+            win::setNonBlocking(c, false);  // an accepted socket inherits the listener's mode
+            noDelay(c);
+            const int cfd = win::registerSocket(c);
+            protoio::forget(cfd);
+            return cfd;
+        }
+        if (st->closed.load()) return std::nullopt;
+        const int e = ::WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAEINTR || e == WSAECONNRESET) continue;
+        netError(win::errnoOfWsa(e), "accept");
+    }
+}
+
+Address sockName(int fd) { return nameOf(fd, false); }
+
+Address peerName(int fd) { return nameOf(fd, true); }
+
+std::uintptr_t nativeSocket(int fd) { return static_cast<std::uintptr_t>(native(fd)); }
+
+void tlsConnect(int fd, const std::string& host, bool verify) {
+    auto st = detail::fdState(fd);
+    const SOCKET s = native(fd);
+    std::string failure;
+    int err = 0;
+    {
+        std::lock_guard<std::mutex> rlock(st->readMutex);
+        std::lock_guard<std::mutex> wlock(st->writeMutex);
+        SSL* ssl = st->ssl.load() ? nullptr : SSL_new(detail::tlsContext(verify));
+        if (!ssl) {
+            failure = st->ssl.load() ? "the connection already uses TLS" : detail::tlsErrorText();
+        } else {
+            // OpenSSL takes a Windows socket as an int (socket handles fit in 32 bits).
+            SSL_set_fd(ssl, static_cast<int>(s));
+            SSL_set_tlsext_host_name(ssl, host.c_str());
+            if (verify) SSL_set1_host(ssl, host.c_str());
+            win::setNonBlocking(s, true);
+            st->ssl.store(ssl);
+            const int rc = detail::sslCall(*st, [](SSL* s, void*) { return SSL_connect(s); }, nullptr);
+            if (rc != 1) {
+                const long v = SSL_get_verify_result(ssl);
+                if (rc < 0 && errno == ETIMEDOUT) err = ETIMEDOUT;
+                else failure = v != X509_V_OK ? std::string("TLS certificate: ") + X509_verify_cert_error_string(v)
+                                              : detail::tlsErrorText();
+                st->ssl.store(nullptr);
+                SSL_free(ssl);
+            }
+        }
+    }
+    if (err) netError(err, "TLS handshake with " + host);
+    if (!failure.empty()) throw Error(Error::Kind::Network, failure + " (" + host + ")");
+}
+
+int udpBind(const std::string& host, int port) {
+    checkPort(port);
+    AddrList addrs;
+    resolve(host.empty() ? "0.0.0.0" : host, port, SOCK_DGRAM, true, addrs);
+    SOCKET s = INVALID_SOCKET;
+    int lastErr = EADDRNOTAVAIL;
+    for (addrinfo* ai = addrs.head; ai; ai = ai->ai_next) {
+        s = newSocket(ai);
+        if (s == INVALID_SOCKET) { lastErr = lastErrno(); continue; }
+        setFlag(s, SO_REUSEADDR);
+        setFlag(s, SO_BROADCAST);
+        if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) break;
+        lastErr = lastErrno();
+        ::closesocket(s);
+        s = INVALID_SOCKET;
+    }
+    if (s == INVALID_SOCKET) netError(lastErr, "cannot bind UDP port " + std::to_string(port));
+    // Windows answers a datagram that drew an ICMP "port unreachable" with
+    // WSAECONNRESET on the next receive; POSIX ignores it, and so do we.
+    BOOL report = FALSE;
+    DWORD got = 0;
+    ::WSAIoctl(s, SIO_UDP_CONNRESET, &report, sizeof report, nullptr, 0, &got, nullptr, nullptr);
+    win::setNonBlocking(s, true);  // see udpReceive
+    const int fd = win::registerSocket(s);
+    protoio::forget(fd);
+    return fd;
+}
+
+void udpSend(int fd, const std::string& host, int port, std::string_view data) {
+    checkPort(port);
+    auto st = detail::fdState(fd);  // held: a concurrent close cannot free the socket under us
+    const SOCKET s = native(fd);
+    // Resolve to the socket's own address family: an IPv4 socket cannot send
+    // to an IPv6 address.
+    sockaddr_storage own{};
+    int ownLen = sizeof own;
+    const int family = ::getsockname(s, reinterpret_cast<sockaddr*>(&own), &ownLen) == 0 ? own.ss_family
+                                                                                        : AF_UNSPEC;
+    AddrList addrs;
+    resolve(host, port, SOCK_DGRAM, false, addrs, family);
+    for (;;) {
+        const int n = ::sendto(s, data.data(), static_cast<int>(data.size()), 0, addrs.head->ai_addr,
+                               static_cast<int>(addrs.head->ai_addrlen));
+        if (n != SOCKET_ERROR) return;
+        const int e = ::WSAGetLastError();
+        if (e == WSAEWOULDBLOCK && !st->closed.load()) {  // the socket is non-blocking
+            detail::waitReady(fd, POLLOUT, st->timeoutMs.load(), &st->closed);
+            continue;
+        }
+        netError(win::errnoOfWsa(e), "send to " + host);
+    }
+}
+
+std::optional<Datagram> udpReceive(int fd, int timeoutMs) {
+    auto st = detail::fdState(fd);  // held: a concurrent close cannot free the socket under us
+    const SOCKET s = native(fd);
+    Deadline deadline(timeoutMs);
+    Datagram d;
+    d.data.resize(65536);
+    sockaddr_storage ss{};
+    for (;;) {
+        if (!detail::waitReady(fd, POLLIN, deadline.remaining(), &st->closed) || st->closed.load())
+            return std::nullopt;
+        int len = sizeof ss;
+        // The socket is non-blocking: when another thread took the datagram
+        // first, wait again for what is left of the time.
+        const int n = ::recvfrom(s, d.data.data(), static_cast<int>(d.data.size()), 0,
+                                 reinterpret_cast<sockaddr*>(&ss), &len);
+        if (n != SOCKET_ERROR) {
+            d.data.resize(static_cast<std::size_t>(n));
+            break;
+        }
+        if (st->closed.load()) return std::nullopt;
+        const int e = ::WSAGetLastError();
+        if (e == WSAEWOULDBLOCK || e == WSAEINTR || e == WSAECONNRESET) continue;
+        netError(win::errnoOfWsa(e), "receive");
+    }
+    const Address from = addressOf(reinterpret_cast<sockaddr*>(&ss));
+    d.host = from.host;
+    d.port = from.port;
+    return d;
+}
+
+#else
 
 int tcpConnect(const std::string& host, int port, int timeoutMs) {
     checkPort(port);
@@ -312,6 +603,7 @@ std::optional<Datagram> udpReceive(int fd, int timeoutMs) {
     d.port = from.port;
     return d;
 }
+#endif
 
 } // namespace net
 } // namespace protoio

@@ -14,10 +14,17 @@
 #include <cstring>
 #include <unordered_map>
 
+#ifdef _WIN32
+#include <algorithm>
+#include <chrono>
+#include <climits>
+#include <io.h>
+#else
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -32,7 +39,13 @@ namespace protoio {
 // other write -- a child's input, a file that is a FIFO, a TLS socket, which
 // OpenSSL writes with write(2) -- blocks the signal on the writing thread
 // instead, so the write answers EPIPE and becomes a catchable error.
+//
+// Windows has no SIGPIPE: such a write fails with an error by itself.
 
+#ifdef _WIN32
+SigpipeGuard::SigpipeGuard() = default;
+SigpipeGuard::~SigpipeGuard() = default;
+#else
 SigpipeGuard::SigpipeGuard() {
     sigset_t block, pending;
     sigemptyset(&block);
@@ -56,6 +69,7 @@ SigpipeGuard::~SigpipeGuard() {
     }
     pthread_sigmask(SIG_SETMASK, &old_, nullptr);
 }
+#endif
 
 namespace detail {
 
@@ -68,22 +82,52 @@ std::unordered_map<int, std::shared_ptr<FdState>> g_fds;
 
 FdState::~FdState() {
     if (SSL* s = ssl.load()) SSL_free(s);
+#ifdef _WIN32
+    if (closed.load()) win::closeDescriptor(fd);
+#else
     if (closed.load()) ::close(fd);
+#endif
 }
 
 std::shared_ptr<FdState> fdState(int fd) {
     std::lock_guard<std::mutex> lock(g_fdMutex);
     auto& p = g_fds[fd];
     if (!p) {
+#ifdef _WIN32
+        p = std::make_shared<FdState>(fd, win::socketOf(fd) != INVALID_SOCKET);
+#else
         struct stat st{};
         p = std::make_shared<FdState>(fd, ::fstat(fd, &st) == 0 && S_ISSOCK(st.st_mode));
+#endif
     }
     return p;
 }
 
 // ------------------------------------------------------------------- waits
 
-bool waitReady(int fd, short events, int timeoutMs) {
+#ifdef _WIN32
+// Closing a socket on Windows does not wake a thread waiting on it, so a long
+// wait goes in slices and checks `cancelled` between them.
+bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled) {
+    const SOCKET s = win::socketOf(fd);
+    if (s == INVALID_SOCKET) return win::waitPipe(fd, events, timeoutMs, cancelled);
+    constexpr int kSliceMs = 50;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+    for (;;) {
+        if (cancelled && cancelled->load()) return true;
+        int slice = kSliceMs;
+        if (timeoutMs >= 0) {
+            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
+            slice = static_cast<int>(std::clamp<long long>(left.count(), 0, kSliceMs));
+        }
+        WSAPOLLFD p{s, events, 0};
+        const int r = ::WSAPoll(&p, 1, slice);
+        if (r != 0) return true;  // ready, or an error the next call reports
+        if (timeoutMs >= 0 && std::chrono::steady_clock::now() >= end) return false;
+    }
+}
+#else
+bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>*) {
     pollfd p{fd, events, 0};
     for (;;) {
         const int r = ::poll(&p, 1, timeoutMs);
@@ -91,6 +135,7 @@ bool waitReady(int fd, short events, int timeoutMs) {
         return r != 0;
     }
 }
+#endif
 
 int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
     for (;;) {
@@ -102,14 +147,21 @@ int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
             std::lock_guard<std::mutex> lock(st.sslMutex);
             ERR_clear_error();
             errno = 0;
+#ifdef _WIN32
+            ::WSASetLastError(0);
+#endif
             r = op(ssl, arg);
             savedErrno = errno;
+#ifdef _WIN32
+            // OpenSSL's socket BIO reports Winsock errors, not errno.
+            if (savedErrno == 0) savedErrno = win::errnoOfWsa(::WSAGetLastError());
+#endif
             e = r > 0 ? SSL_ERROR_NONE : SSL_get_error(ssl, r);
         }
         if (r > 0) return r;
         if (e == SSL_ERROR_ZERO_RETURN) return 0;
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            if (!waitReady(st.fd, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, st.timeoutMs.load())) {
+            if (!waitReady(st.fd, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, st.timeoutMs.load(), &st.closed)) {
                 errno = ETIMEDOUT;
                 return -1;
             }
@@ -135,12 +187,30 @@ ssize_t rawRead(FdState& st, char* out, std::size_t n) {
             return SSL_read(s, b->p, b->n);
         }, &b);
     }
+#ifdef _WIN32
+    if (!waitReady(st.fd, POLLIN, st.timeoutMs.load(), &st.closed)) { errno = ETIMEDOUT; return -1; }
+    if (st.closed.load()) return 0;  // closed meanwhile: the end, as a shut-down socket answers on POSIX
+    const int want = static_cast<int>(std::min<std::size_t>(n, INT_MAX));
+    if (st.isSocket) {
+        const int r = ::recv(win::socketOf(st.fd), out, want, 0);
+        if (r == SOCKET_ERROR) {
+            const int e = ::WSAGetLastError();
+            if (e == WSAESHUTDOWN) return 0;
+            errno = win::errnoOfWsa(e);
+            return -1;
+        }
+        return r;
+    }
+    win::QuietCrt quiet;
+    return ::_read(st.fd, out, static_cast<unsigned>(want));  // binary descriptors: bytes as they are
+#else
     if (!waitReady(st.fd, POLLIN, st.timeoutMs.load())) { errno = ETIMEDOUT; return -1; }
     for (;;) {
         const ssize_t r = ::read(st.fd, out, n);
         if (r < 0 && errno == EINTR) continue;
         return r;
     }
+#endif
 }
 
 [[noreturn]] void lineTooLong(std::size_t max) {
@@ -163,6 +233,32 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
             if (r <= 0) netError(r == 0 ? EPIPE : errno, "TLS write");
             w = r;
         } else {
+#ifdef _WIN32
+            if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load(), &st.closed)) netError(ETIMEDOUT, "write");
+            const int want = static_cast<int>(std::min<std::size_t>(size - done, 1 << 30));
+            if (st.isSocket) {
+                const int r = ::send(win::socketOf(st.fd), data + done, want, 0);
+                if (r == SOCKET_ERROR) {
+                    const int e = ::WSAGetLastError();
+                    if (e == WSAEWOULDBLOCK) continue;  // a non-blocking (UDP) socket: wait again
+                    netError(win::errnoOfWsa(e), "write");
+                }
+                w = r;
+            } else {
+                int r;
+                {
+                    win::QuietCrt quiet;
+                    r = ::_write(st.fd, data + done, static_cast<unsigned>(want));
+                }
+                if (r < 0) {
+                    // A pipe whose reader is gone: EPIPE, as on POSIX.
+                    const unsigned long os = _doserrno;
+                    const int e = (os == ERROR_NO_DATA || os == ERROR_BROKEN_PIPE) ? EPIPE : errno;
+                    fileError("descriptor " + std::to_string(st.fd), e, "cannot write to");
+                }
+                w = r;
+            }
+#else
             if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
             w = st.isSocket ? ::send(st.fd, data + done, size - done, MSG_NOSIGNAL)
                             : ::write(st.fd, data + done, size - done);
@@ -171,6 +267,7 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
                 if (st.isSocket) netError(errno, "write");
                 fileError("descriptor " + std::to_string(st.fd), errno, "cannot write to");
             }
+#endif
         }
         done += static_cast<std::size_t>(w);
     }
@@ -312,9 +409,15 @@ void close(int fd) {
     }
     if (!st) {
         // Never read from or written to through a state: nobody else holds it.
+#ifdef _WIN32
+        const SOCKET s = detail::win::socketOf(fd);
+        if (s != INVALID_SOCKET) ::shutdown(s, SD_BOTH);
+        detail::win::closeDescriptor(fd);
+#else
         struct stat sst{};
         if (::fstat(fd, &sst) == 0 && S_ISSOCK(sst.st_mode)) ::shutdown(fd, SHUT_RDWR);
         ::close(fd);
+#endif
         return;
     }
     if (st->closed.exchange(true)) return;
@@ -327,7 +430,12 @@ void close(int fd) {
     // shutdown wakes a thread blocked in accept, poll or read on this socket,
     // which a bare close does not. The descriptor is closed by the state's
     // destructor, when its last user lets it go.
+#ifdef _WIN32
+    // (On Windows a waiting thread notices `closed` within its wait slice.)
+    if (st->isSocket) ::shutdown(detail::win::socketOf(fd), SD_BOTH);
+#else
     if (st->isSocket) ::shutdown(fd, SHUT_RDWR);
+#endif
 }
 
 void setTimeout(int fd, int ms) {

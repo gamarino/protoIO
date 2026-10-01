@@ -9,7 +9,9 @@
 #include <string_view>
 
 // Buffered streams over POSIX file descriptors (files, pipes, sockets, the
-// standard streams, TLS sockets).
+// standard streams, TLS sockets). On Windows a descriptor is a C runtime
+// descriptor (files, pipes, the standard streams) or the number the library
+// gives each socket it creates; see README.md, "Windows".
 //
 // Every function here may block. A runtime calls it inside its own "leave the
 // collector's quorum" bracket; the library touches no runtime object.
@@ -32,6 +34,7 @@ namespace protoio {
 // uses it on every write except to the process's own standard output, which
 // keeps the default action (a filter piped into `head` stops, as every Unix
 // filter does). Exposed for runtimes that write to descriptors themselves.
+// Windows has no SIGPIPE (such a write simply fails): there it does nothing.
 class SigpipeGuard {
 public:
     SigpipeGuard();
@@ -39,9 +42,11 @@ public:
     SigpipeGuard(const SigpipeGuard&) = delete;
     SigpipeGuard& operator=(const SigpipeGuard&) = delete;
 
+#ifndef _WIN32
 private:
     sigset_t old_{};
     bool wasPending_ = false;
+#endif
 };
 
 // A line without its end (LF or CRLF), or std::nullopt at the end of the

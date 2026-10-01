@@ -12,8 +12,12 @@
 #include <mutex>
 #include <string>
 
+#ifdef _WIN32
+#include "platform_win.h"
+#else
 #include <poll.h>
 #include <sys/types.h>
+#endif
 
 typedef struct ssl_st SSL;
 typedef struct ssl_ctx_st SSL_CTX;
@@ -21,6 +25,10 @@ typedef struct ssl_ctx_st SSL_CTX;
 namespace protoio::detail {
 
 // ------------------------------------------------------------------ errors
+
+// The text of an errno value (strerror, which on Windows lacks the network
+// codes).
+std::string errorText(int err);
 
 // ENOENT -> FileNotFound, EEXIST -> FileExists, anything else -> FileSystem.
 [[noreturn]] void fileError(const std::string& path, int err, const char* action);
@@ -70,8 +78,10 @@ std::shared_ptr<FdState> fdState(int fd);
 
 // Waits until `fd` is ready for `events` within `timeoutMs` (-1: no limit).
 // False on timeout; true also on an error or hang-up, which the call that
-// follows reports.
-bool waitReady(int fd, short events, int timeoutMs);
+// follows reports. On Windows the wait also ends once `cancelled` (the
+// descriptor's `closed` flag) is set, because closing a socket there does
+// not wake a thread waiting on it; POSIX ignores it.
+bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled = nullptr);
 
 // Reads more input into the buffer; false at the end of the stream. The
 // caller holds readMutex.
