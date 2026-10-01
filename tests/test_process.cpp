@@ -86,6 +86,17 @@ TEST(Process, RunFeedsInput) {
     EXPECT_EQ(r2.out, "");
 }
 
+#ifndef _WIN32
+// A child that exits without reading its input: writing the rest is EPIPE, and
+// the caller gets the child's exit code, not a SIGPIPE (macOS could deliver it
+// to a thread that does not block it).
+TEST(Process, InputToAChildThatIgnoresItIsNotFatal) {
+    const std::string big(4 * 1024 * 1024, 'q');
+    auto r = process::run({"sh", "-c", "exit 0"}, big);
+    EXPECT_EQ(r.exitCode, 0);
+}
+#endif
+
 TEST(Process, RunLargeOutputAndInputDoNotDeadlock) {
     const std::string big(3 * 1024 * 1024, 'q');
     auto r = process::run(kCat, big);

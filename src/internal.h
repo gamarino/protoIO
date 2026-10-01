@@ -68,6 +68,11 @@ inline int newPipe(int fds[2]) {
     if (::pipe(fds) != 0) return -1;
     ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
     ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#ifdef F_SETNOSIGPIPE
+    // A write to a pipe whose reader is gone must answer EPIPE, not kill the
+    // process: macOS can deliver that SIGPIPE to a thread that does not block it.
+    ::fcntl(fds[1], F_SETNOSIGPIPE, 1);
+#endif
     return 0;
 }
 inline constexpr int kNoSigpipe = 0;
