@@ -157,7 +157,12 @@ std::string absolute(const std::string& path) {
 std::string tempDir() {
     std::error_code ec;
     const fs::path p = fs::temp_directory_path(ec);
-    return ec ? std::string("/tmp") : p.string();
+    if (ec) return std::string("/tmp");
+    // macOS's $TMPDIR ends with a separator; Linux's /tmp does not. Drop it, so
+    // `tempDir() + "/name"` is the same path everywhere.
+    std::string s = p.string();
+    while (s.size() > 1 && s.back() == '/') s.pop_back();
+    return s;
 }
 
 std::string cwd() {

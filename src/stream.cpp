@@ -20,6 +20,8 @@
 #include <climits>
 #include <io.h>
 #else
+#include <algorithm>
+#include <chrono>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -134,8 +136,31 @@ bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* can
     }
 }
 #else
-bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>*) {
+bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled) {
     pollfd p{fd, events, 0};
+#if defined(__APPLE__)
+    // On Linux, close's shutdown wakes a thread polling any socket. On macOS it
+    // wakes none on a listening or a UDP socket (shutdown answers ENOTCONN), so
+    // a caller that can be cancelled waits in slices and checks the flag.
+    if (cancelled) {
+        constexpr int kSliceMs = 50;
+        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
+        for (;;) {
+            if (cancelled->load()) return true;
+            int slice = kSliceMs;
+            if (timeoutMs >= 0) {
+                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
+                slice = static_cast<int>(std::clamp<long long>(left.count(), 0, kSliceMs));
+            }
+            const int r = ::poll(&p, 1, slice);
+            if (r < 0 && errno == EINTR) continue;
+            if (r != 0) return true;  // ready, or an error the next call reports
+            if (timeoutMs >= 0 && std::chrono::steady_clock::now() >= end) return false;
+        }
+    }
+#else
+    (void)cancelled;
+#endif
     for (;;) {
         const int r = ::poll(&p, 1, timeoutMs);
         if (r < 0 && errno == EINTR) continue;
@@ -211,7 +236,7 @@ ssize_t rawRead(FdState& st, char* out, std::size_t n) {
     win::QuietCrt quiet;
     return ::_read(st.fd, out, static_cast<unsigned>(want));  // binary descriptors: bytes as they are
 #else
-    if (!waitReady(st.fd, POLLIN, st.timeoutMs.load())) { errno = ETIMEDOUT; return -1; }
+    if (!waitReady(st.fd, POLLIN, st.timeoutMs.load(), &st.closed)) { errno = ETIMEDOUT; return -1; }
     for (;;) {
         const ssize_t r = ::read(st.fd, out, n);
         if (r < 0 && errno == EINTR) continue;
@@ -266,7 +291,7 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
                 w = r;
             }
 #else
-            if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
+            if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load(), &st.closed)) netError(ETIMEDOUT, "write");
             w = st.isSocket ? ::send(st.fd, data + done, size - done, detail::kNoSigpipe)
                             : ::write(st.fd, data + done, size - done);
             if (w < 0) {

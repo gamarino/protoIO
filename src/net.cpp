@@ -507,7 +507,7 @@ std::optional<int> tcpAccept(int fd, int timeoutMs) {
     // again for what is left of its time, instead of blocking in accept.
     Deadline deadline(timeoutMs);
     for (;;) {
-        if (!detail::waitReady(fd, POLLIN, deadline.remaining())) return std::nullopt;
+        if (!detail::waitReady(fd, POLLIN, deadline.remaining(), &st->closed)) return std::nullopt;
         if (st->closed.load()) return std::nullopt;
         const int c = detail::acceptSocket(fd);
         if (c >= 0) {
@@ -602,7 +602,7 @@ std::optional<Datagram> udpReceive(int fd, int timeoutMs) {
     d.data.resize(65536);
     sockaddr_storage ss{};
     for (;;) {
-        if (!detail::waitReady(fd, POLLIN, deadline.remaining()) || st->closed.load()) return std::nullopt;
+        if (!detail::waitReady(fd, POLLIN, deadline.remaining(), &st->closed) || st->closed.load()) return std::nullopt;
         socklen_t len = sizeof ss;
         // MSG_DONTWAIT: when another thread took the datagram first, wait
         // again for what is left of the time instead of blocking here.

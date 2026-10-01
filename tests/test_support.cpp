@@ -58,6 +58,11 @@ void socketPair(int fds[2]) {
         ::fcntl(fds[i], F_SETFD, FD_CLOEXEC);
         const int one = 1;
         ::setsockopt(fds[i], SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+        // Tests write up to 200 KB before reading, on one thread; Linux's
+        // AF_UNIX buffers hold that, macOS's default few KB do not.
+        const int big = 1 << 20;
+        ::setsockopt(fds[i], SOL_SOCKET, SO_SNDBUF, &big, sizeof big);
+        ::setsockopt(fds[i], SOL_SOCKET, SO_RCVBUF, &big, sizeof big);
     }
 #endif
     protoio::forget(fds[0]);
