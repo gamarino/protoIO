@@ -16,7 +16,8 @@ once, with those fixes, so a defect is fixed once for every runtime.
 - **Independent:** no dependency on protoCore; plain C++ types only
   (`std::string` for bytes and UTF-8 text, integers, `std::vector`,
   `std::optional`, small structs).
-- **Platform:** POSIX (Linux first). Windows only through WSL2.
+- **Platform:** POSIX (Linux first) and Windows (MSVC, native Winsock and
+  Win32; see [Windows](#windows)).
 - **License:** MIT, Copyright (c) 2026 Gustavo Marino.
 
 Design: [`docs/specs/2026-09-30-protoio-design.md`](docs/specs/2026-09-30-protoio-design.md).
@@ -153,6 +154,67 @@ setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --o
 
 Options: `PROTOIO_BUILD_TESTS` and `PROTOIO_INSTALL` (both ON only for a
 top-level build), `PROTOIO_TSAN`.
+
+## Windows
+
+protoIO builds natively with MSVC (Visual Studio 2022, C++20) and Ninja, from
+a "x64 Native Tools Command Prompt for VS 2022" (or after `vcvars64.bat`).
+Any OpenSSL 3 with headers and import libraries will do; PostgreSQL 17 ships
+one:
+
+```bat
+cmake -S . -B C:\build\protoio -G Ninja -DCMAKE_BUILD_TYPE=Release "-DOPENSSL_ROOT_DIR=C:/Program Files/PostgreSQL/17"
+cmake --build C:\build\protoio
+ctest --test-dir C:\build\protoio --output-on-failure
+cmake --install C:\build\protoio --prefix C:\protoio
+```
+
+The install leaves `lib\protoio.lib`, the headers and
+`lib\cmake\protoIO\protoIOConfig.cmake`: a consumer configures with
+`-DCMAKE_PREFIX_PATH=C:/protoio` and the same `OPENSSL_ROOT_DIR`, and uses the
+`find_package` snippet below (`cpack` zips the same tree). protoIO links
+`ws2_32` for its consumers. The library is built for one configuration (`/MD`
+for Release, `/MDd` for Debug): install the one the consumer builds. The test
+programs get the OpenSSL DLLs copied next to them; any other program that
+links protoIO needs them on its `PATH` or beside it.
+
+The API is the same; what differs:
+
+- **Descriptors.** Files, pipes and the standard streams are C runtime
+  descriptors (`_wopen`, `_pipe`), opened in binary mode. A `SOCKET` is not
+  one, so each socket the library creates gets a number of its own (65536 and
+  up); `net::nativeSocket(fd)` answers the `SOCKET` behind it, for calls the
+  library does not make. A socket a runtime creates itself cannot be used
+  with the stream functions.
+- **Text.** Paths, arguments and environment strings are UTF-8, converted to
+  and from the UTF-16 the system uses. `absolute`, `cwd` and `tempDir` answer
+  native separators (`C:\dir\file`); `absolute("/")` is the drive root. The
+  standard streams stay as the C runtime opened them (text mode: a `"\n"`
+  written to descriptor 1 or 2 becomes CR LF); a runtime that wants raw bytes
+  there calls `_setmode(fd, _O_BINARY)`.
+- **SIGPIPE** does not exist: `SigpipeGuard` does nothing, and a write to a
+  pipe whose reader is gone fails with EPIPE by itself.
+- **Waits.** Closing a socket does not wake a thread waiting on it, so waits
+  run in 50 ms slices and notice `close` within one. Anonymous pipes cannot
+  be polled: a read timeout on a pipe is enforced by checking for input every
+  5 ms, and a write to a pipe ignores the timeout.
+- **Errors.** Winsock and Win32 codes are mapped to the errno values of the
+  POSIX build (`WSAECONNREFUSED` is `ECONNREFUSED`, a broken pipe is `EPIPE`,
+  ...). A write to a TCP connection the peer closed reports `ECONNRESET` or
+  `ECONNABORTED` where Linux reports `EPIPE`.
+- **TCP.** `tcpListen` does not set `SO_REUSEADDR` (on Windows it would let
+  another socket take the port). A connect to a loopback address that is
+  refused fails at once, as on POSIX; Windows would otherwise send the SYN
+  again for about two seconds, so on loopback those retries are switched off.
+- **Processes.** `run` and `spawn` use `CreateProcessW`. `argv[0]` is
+  searched as `CreateProcess` searches (`.exe` is implied; a batch file needs
+  `cmd /c`), and the arguments are quoted so that the child's C runtime gets
+  `argv` back unchanged. A child inherits only its three standard handles.
+  `kill` supports 0, `SIGTERM` (15) and `SIGKILL` (9); the last two end the
+  child with exit code 128 + signal, what `wait` and `run` answer on POSIX for
+  a child that signal ended. Any other signal throws `Process` with `ENOSYS`.
+  `wait` works for children started by `spawn` (others throw `Process`,
+  `ECHILD`). `platform()` is `"windows"`.
 
 ## Consuming protoIO from CMake
 

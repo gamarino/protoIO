@@ -3,6 +3,20 @@
 All notable changes to protoIO are recorded here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- Native Windows support (MSVC 2022, Winsock, Win32): `src/platform_win.cpp`
+  (socket descriptors, error mapping, UTF-8 conversion), `src/file_win.cpp`
+  and `src/process_win.cpp` (`CreateProcessW`), and `#ifdef _WIN32` blocks in
+  the stream and network code. The POSIX build is unchanged. See README.md,
+  "Windows", for what differs there.
+- `net::nativeSocket(fd)` (Windows only): the `SOCKET` behind a descriptor.
+- Tests: non-ASCII file names, a read timeout on a pipe; on Windows, argument
+  quoting, PATH search and unsupported signals, with a small child program
+  (`tests/testchild.cpp`) standing in for `sh`, `cat`, `true` and `sleep`.
+
 ## 0.1.0 - 2026-09-30
 
 First release: protoST 0.5.0's POSIX I/O layer moved into a library shared by
