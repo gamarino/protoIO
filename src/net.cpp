@@ -87,11 +87,12 @@ void resolve(const std::string& host, int port, int socktype, bool passive, Addr
     const std::string service = std::to_string(port);
     const int r = ::getaddrinfo(host.empty() ? nullptr : host.c_str(), service.c_str(), &hints, &out.head);
     if (r != 0) throw Error(Error::Kind::NameLookup, "cannot resolve " + host + ": " + ::gai_strerror(r));
-#ifdef _WIN32
-    // The wildcard address: glibc answers 0.0.0.0 before ::, Windows the other
-    // way round, and a Windows IPv6 socket is IPv6-only by default, so binding
-    // the first answer left 127.0.0.1 refused. Put the IPv4 answers first, as
-    // on Linux. (Every node stays in the list, so freeaddrinfo frees them all.)
+#if defined(_WIN32) || defined(__APPLE__)
+    // The wildcard address: glibc answers 0.0.0.0 before ::, Windows and macOS
+    // the other way round. A Windows IPv6 socket is IPv6-only by default, so
+    // binding the first answer left 127.0.0.1 refused; a macOS one takes IPv4
+    // peers as ::ffff:a.b.c.d. Put the IPv4 answers first, as on Linux. (Every
+    // node stays in the list, so freeaddrinfo frees them all.)
     if (passive && host.empty() && out.head) {
         addrinfo *v4 = nullptr, **v4Tail = &v4, *rest = nullptr, **restTail = &rest;
         for (addrinfo* ai = out.head; ai;) {

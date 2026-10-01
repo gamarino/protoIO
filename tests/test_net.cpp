@@ -90,6 +90,8 @@ TEST(Net, WildcardListenerAcceptsIpv4Loopback) {
     std::thread server([&] {
         auto c = net::tcpAccept(listener, 5000);
         ASSERT_TRUE(c);
+        // An IPv4 peer, not ::ffff:127.0.0.1 (macOS lists :: first too).
+        EXPECT_EQ(net::peerName(*c).host, "127.0.0.1");
         protoio::write(*c, "ok\n");
         protoio::close(*c);
     });
