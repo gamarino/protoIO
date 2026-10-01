@@ -39,13 +39,21 @@ include(GNUInstallDirs)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
+if(WIN32)
+    # Files and processes have a Windows implementation of their own; the
+    # rest share their source, with the differences in #ifdef _WIN32 blocks
+    # and src/platform_win.cpp.
+    set(PROTOIO_PLATFORM_SOURCES src/file_win.cpp src/process_win.cpp src/platform_win.cpp)
+else()
+    set(PROTOIO_PLATFORM_SOURCES src/file.cpp src/process.cpp)
+endif()
+
 add_library(protoio STATIC
     src/error.cpp
     src/stream.cpp
-    src/file.cpp
-    src/process.cpp
     src/net.cpp
     src/http.cpp
+    ${PROTOIO_PLATFORM_SOURCES}
 )
 add_library(protoIO::protoio ALIAS protoio)
 set_target_properties(protoio PROPERTIES EXPORT_NAME protoio OUTPUT_NAME protoio)
@@ -57,9 +65,20 @@ target_include_directories(protoio
         ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_features(protoio PUBLIC cxx_std_20)
 target_compile_definitions(protoio PRIVATE PROTOIO_VERSION="${PROJECT_VERSION}")
-target_compile_options(protoio PRIVATE -Wall -Wextra -Wpedantic)
+if(MSVC)
+    # /utf-8: the sources are UTF-8. The CRT's "use the _s variant" and POSIX
+    # name warnings do not apply to portable code.
+    target_compile_options(protoio PRIVATE /W4 /permissive- /utf-8)
+    target_compile_definitions(protoio PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS
+                                               WIN32_LEAN_AND_MEAN NOMINMAX)
+else()
+    target_compile_options(protoio PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 # PUBLIC: consumers link the static archive, so they need its dependencies.
 target_link_libraries(protoio PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+if(WIN32)
+    target_link_libraries(protoio PUBLIC ws2_32)
+endif()
 
 # ---------------------------------------------------------------- package config
 #
@@ -94,7 +113,11 @@ if(PROTOIO_INSTALL)
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION} (static library and headers)")
     set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
     set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
-    set(CPACK_GENERATOR "DEB")
+    if(WIN32)
+        set(CPACK_GENERATOR "ZIP")  # cpack  ->  protoio-dev-<version>-win64.zip
+    else()
+        set(CPACK_GENERATOR "DEB")
+    endif()
     set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")
     set(CPACK_DEBIAN_PACKAGE_MAINTAINER "Gustavo Marino <gamarino@gmail.com>")
     set(CPACK_DEBIAN_PACKAGE_SECTION "libdevel")
