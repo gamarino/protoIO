@@ -86,11 +86,13 @@ int errnoOfWin32(unsigned long win32Error);
 // end of its input. Answers the count, 0 at the end of the stream, or -1 with
 // errno set.
 //
-// With `timeoutMs` >= 0, a read from a pipe or a character device (the
-// console) that is still blocked at the deadline is cancelled
-// (CancelSynchronousIo, from a thread-pool timer) and fails with ETIMEDOUT:
-// the thread waits in the read itself, with no polling. Reads from disk files
-// never block, and ignore the timeout.
+// With `timeoutMs` >= 0, a read from a pipe or a character device that is
+// still blocked at the deadline is cancelled (CancelSynchronousIo, from a
+// thread-pool timer) and fails with ETIMEDOUT: the thread waits in the read
+// itself, with no polling. A console read is not cancelled (that loses the
+// next line): it starts only once a line is there, after a bounded wait on
+// the console handle (see waitConsoleInput). Reads from disk files never
+// block, and ignore the timeout.
 ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs);
 
 // UTF-8 <-> UTF-16, for every path, argument and environment string handed

@@ -15,6 +15,7 @@
 #include <mutex>
 #include <system_error>
 #include <unordered_map>
+#include <vector>
 
 #include <io.h>
 #include <stdlib.h>
@@ -213,6 +214,61 @@ private:
 
 bool isHighSurrogate(wchar_t c) { return c >= 0xD800 && c <= 0xDBFF; }
 
+// Whether a key in a console input record types something.
+bool typesACharacter(const INPUT_RECORD& r) {
+    return r.EventType == KEY_EVENT && r.Event.KeyEvent.bKeyDown &&
+           (r.Event.KeyEvent.uChar.UnicodeChar != 0 || r.Event.KeyEvent.wVirtualKeyCode == VK_RETURN);
+}
+
+// Waits at most `timeoutMs` until a ReadConsoleW on `h` would return at once:
+// in line mode (ENABLE_LINE_INPUT, the default) once a line is complete (an
+// Enter key is in the input buffer), otherwise once any character is.
+//
+// A console read cannot be cancelled cleanly: a cancelled cooked read lives
+// on inside the console and swallows the next line typed. So the wait comes
+// before the read. While the input buffer is empty the wait blocks on the
+// console handle (signalled when input arrives); while it holds a partly
+// typed line it re-checks every 10 ms. Records that type nothing (key
+// releases, focus, mouse and resize events) at the front of the buffer are
+// dropped, as ReadConsoleW would drop them, so they never keep the handle
+// signalled.
+bool waitConsoleInput(HANDLE h, DWORD mode, int timeoutMs) {
+    const bool lineMode = (mode & ENABLE_LINE_INPUT) != 0;
+    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    std::vector<INPUT_RECORD> records;
+    for (;;) {
+        DWORD count = 0;
+        if (!::GetNumberOfConsoleInputEvents(h, &count)) return true;  // the read reports the failure
+        bool typed = false;
+        if (count > 0) {
+            records.resize(count);
+            DWORD peeked = 0;
+            if (!::PeekConsoleInputW(h, records.data(), count, &peeked)) return true;
+            DWORD leadingNoise = 0;
+            for (DWORD i = 0; i < peeked; ++i) {
+                const INPUT_RECORD& r = records[i];
+                if (!typesACharacter(r)) {
+                    if (!typed) ++leadingNoise;
+                    continue;
+                }
+                typed = true;
+                if (!lineMode) return true;
+                if (r.Event.KeyEvent.wVirtualKeyCode == VK_RETURN || r.Event.KeyEvent.uChar.UnicodeChar == L'\r')
+                    return true;
+            }
+            if (leadingNoise > 0) {
+                DWORD dropped = 0;
+                ::ReadConsoleInputW(h, records.data(), leadingNoise, &dropped);
+            }
+        }
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
+        if (left.count() <= 0) return false;
+        const DWORD ms = static_cast<DWORD>(left.count());
+        if (typed) ::Sleep(std::min<DWORD>(ms, 10));
+        else ::WaitForSingleObject(h, ms);
+    }
+}
+
 } // namespace
 
 ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs) {
@@ -230,7 +286,13 @@ ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs) {
     const DWORD type = ::GetFileType(h);
     const bool mayBlock = console || type == FILE_TYPE_PIPE || type == FILE_TYPE_CHAR;
     for (;;) {
-        IoDeadline deadline(mayBlock ? timeoutMs : -1);
+        if (console && timeoutMs >= 0 && !waitConsoleInput(h, consoleMode, timeoutMs)) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        // Pipes (and character devices other than a console): the read
+        // itself waits, and the timer cancels it at the deadline.
+        IoDeadline deadline(mayBlock && !console ? timeoutMs : -1);
         BOOL ok;
         DWORD got = 0;
         std::wstring units;
@@ -270,17 +332,7 @@ ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs) {
             return -1;
         }
         if (!console) return static_cast<ssize_t>(got);
-        if (got == 0) {
-            // A cancelled console read succeeds with nothing read, where a
-            // pipe read fails with ERROR_OPERATION_ABORTED. Nothing read
-            // otherwise (Ctrl+C): read again. A console's end of input is
-            // Ctrl+Z, below.
-            if (expired) {
-                errno = ETIMEDOUT;
-                return -1;
-            }
-            continue;
-        }
+        if (got == 0) continue;  // nothing read (Ctrl+C): read again; the end of a console's input is Ctrl+Z, below
         if (units[0] == 0x1A) return 0;  // Ctrl+Z at the start of a line: the end, as the C runtime reads it
         const std::string bytes = narrow(units.substr(0, got));
         std::memcpy(out, bytes.data(), bytes.size());
