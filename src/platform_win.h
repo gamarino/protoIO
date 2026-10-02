@@ -79,10 +79,19 @@ void setNonBlocking(SOCKET s, bool on);
 int errnoOfWsa(int wsaError);
 int errnoOfWin32(unsigned long win32Error);
 
-// For a descriptor that is not a socket: waits until a pipe has input, at
-// most `timeoutMs` (polling PeekNamedPipe; anonymous pipes cannot be waited
-// on). Answers true at once for files, for writes and without a timeout.
-bool waitPipe(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled);
+// Reads up to `n` bytes from a descriptor that is not a socket, as bytes,
+// whatever the C runtime's mode for it (text mode would turn CR LF into LF
+// and stop at a Ctrl+Z byte): ReadFile on its handle. A console is read with
+// ReadConsoleW and answered as UTF-8; a line that starts with Ctrl+Z is the
+// end of its input. Answers the count, 0 at the end of the stream, or -1 with
+// errno set.
+//
+// With `timeoutMs` >= 0, a read from a pipe or a character device (the
+// console) that is still blocked at the deadline is cancelled
+// (CancelSynchronousIo, from a thread-pool timer) and fails with ETIMEDOUT:
+// the thread waits in the read itself, with no polling. Reads from disk files
+// never block, and ignore the timeout.
+ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs);
 
 // UTF-8 <-> UTF-16, for every path, argument and environment string handed
 // to the system.

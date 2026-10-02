@@ -76,15 +76,20 @@ std::optional<std::string> ipv6LoopbackUnusable() {
         return std::string("no IPv6 loopback: ") + e.what();
     }
     const int port = net::sockName(probe).port;
-    std::thread t([&] { if (auto c = net::tcpAccept(probe, 3000)) protoio::close(*c); });
+    std::atomic<bool> stop{false};
+    std::thread t([&] {
+        while (!stop.load())
+            if (auto c = net::tcpAccept(probe, 50)) protoio::close(*c);
+    });
     std::optional<std::string> why;
     try {
         protoio::close(net::tcpConnect("::1", port, 1000));
     } catch (const Error& e) {
         why = std::string("the IPv6 loopback address ::1 does not answer: ") + e.what();
     }
-    protoio::close(probe);  // wakes the acceptor if nothing connected
+    stop = true;
     t.join();
+    protoio::close(probe);
     return why;
 }
 
@@ -227,7 +232,10 @@ TEST(Net, CloseWakesBlockedWaitersPromptly) {
 
 // A listener whose backlog is full for a moment does not make connects fail
 // at once: on Windows, which answers such a connect with a reset, the
-// library retries a refused loopback connect for a short while.
+// library retries a refused loopback connect for a short while. Not on
+// macOS, whose kernel itself resets connects beyond a full backlog
+// (ECONNRESET): there the backlog given to tcpListen must be large enough.
+#if !defined(__APPLE__)
 TEST(Net, ConnectsSurviveABrieflyFullBacklog) {
     const int listener = net::tcpListen("127.0.0.1", 0, 1);
     const int port = net::sockName(listener).port;
@@ -262,6 +270,7 @@ TEST(Net, ConnectsSurviveABrieflyFullBacklog) {
     }
     protoio::close(listener);
 }
+#endif
 
 // A server can listen on its port again right after it stopped, while the
 // connections it closed linger in TIME_WAIT.

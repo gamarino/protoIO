@@ -6,17 +6,27 @@
 //
 //   * argv is joined into one command line with the quoting the Microsoft C
 //     runtime (CommandLineToArgvW) undoes, so a child built with it sees the
-//     same argv. argv[0] is searched as CreateProcess searches it (the
-//     application's directory, the working directory, the system
-//     directories, then PATH; ".exe" is appended when there is no
-//     extension). A batch file needs an explicit "cmd /c".
+//     same argv.
+//   * argv[0] is resolved before CreateProcessW sees it (programPath): a
+//     name with a directory is taken as it is; a bare name is searched in
+//     the application's directory, the system directories and PATH -- never
+//     in the working directory, where CreateProcess would look before the
+//     system directories, so a planted cmd.exe or git.exe there never runs.
+//     ".exe" is appended when the name has no extension.
+//   * Batch files (.bat, .cmd) are refused with InvalidArgument: CreateProcess
+//     runs them through cmd.exe, which parses the command line again by
+//     rules no argument quoting can make safe (BatBadBut, CVE-2024-24576).
 //   * A child inherits exactly the handles it is given (a handle list), so
-//     concurrent runs never hold each other's pipes open.
+//     concurrent runs never hold each other's pipes open. The handles are
+//     created non-inheritable; inheritable duplicates exist only for the
+//     length of the CreateProcessW call (see start).
 //   * kill accepts 0 (does the process exist?), SIGTERM (15) and SIGKILL (9);
 //     the last two end the process with TerminateProcess and exit code
 //     128 + signal, so wait and run answer what they answer on POSIX for a
 //     child a signal ended. Any other signal throws Process (ENOSYS): Windows
 //     has no way to deliver it.
+//   * A child that ends with an exception gets 128 + the POSIX signal for
+//     the same fault (exitCodeOf).
 #include "protoio/process.h"
 
 #include "protoio/error.h"
@@ -29,6 +39,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -97,17 +108,123 @@ std::wstring commandLine(const std::vector<std::string>& argv, const char* who) 
     return cmd;
 }
 
-// Starts a child whose standard handles are `in`, `out` and `err` (which must
-// be inheritable) and which inherits nothing else.
+// Calls `get(buffer, size)` (a Win32 call that answers the length it needs
+// when the buffer is too small) until the answer fits; empty on failure.
+template <typename Get>
+std::wstring sized(Get get) {
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = get(buf.data(), static_cast<DWORD>(buf.size()));
+        if (n == 0) return std::wstring();
+        if (n < buf.size()) {
+            buf.resize(n);
+            return buf;
+        }
+        buf.resize(n + 1);
+    }
+}
+
+std::wstring fullPath(const std::wstring& path) {
+    return sized([&](wchar_t* b, DWORD n) { return ::GetFullPathNameW(path.c_str(), n, b, nullptr); });
+}
+
+// The directories a bare program name is searched in, ';'-separated: the
+// application's directory, the system directory, the Windows directory and
+// PATH (each entry unquoted; empty entries skipped). Not the working
+// directory.
+std::wstring searchPath() {
+    std::wstring dirs;
+    auto add = [&](std::wstring d) {
+        if (d.size() >= 2 && d.front() == L'"' && d.back() == L'"') d = d.substr(1, d.size() - 2);
+        if (d.empty()) return;
+        if (!dirs.empty()) dirs += L';';
+        dirs += d;
+    };
+    std::wstring exe = sized([](wchar_t* b, DWORD n) {
+        const DWORD r = ::GetModuleFileNameW(nullptr, b, n);
+        return r == n ? n + 1 : r;  // a truncated answer has the buffer's size
+    });
+    const std::size_t slash = exe.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) add(exe.substr(0, slash));
+    add(sized([](wchar_t* b, DWORD n) { return ::GetSystemDirectoryW(b, n); }));
+    add(sized([](wchar_t* b, DWORD n) { return ::GetWindowsDirectoryW(b, n); }));
+    const std::wstring path = sized([](wchar_t* b, DWORD n) { return ::GetEnvironmentVariableW(L"PATH", b, n); });
+    for (std::size_t start = 0; start <= path.size();) {
+        const std::size_t end = std::min(path.find(L';', start), path.size());
+        add(path.substr(start, end - start));
+        start = end + 1;
+    }
+    return dirs;
+}
+
+// The program CreateProcessW runs for argv[0], as a full path. Throws
+// Process (ENOENT) when there is none, InvalidArgument for a batch file.
+std::wstring programPath(const std::string& argv0) {
+    const std::wstring name = win::widen(argv0);
+    const std::size_t sep = name.find_last_of(L"\\/:");
+    std::wstring found;
+    if (sep != std::wstring::npos) {
+        // A directory (or a drive) is named: no search, as CreateProcess.
+        std::wstring candidate = name;
+        if (name.find(L'.', sep + 1) == std::wstring::npos) candidate += L".exe";
+        found = fullPath(candidate);
+        const DWORD attrs = found.empty() ? INVALID_FILE_ATTRIBUTES : ::GetFileAttributesW(found.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) found.clear();
+    } else if (!name.empty()) {
+        const std::wstring dirs = searchPath();
+        found = sized([&](wchar_t* b, DWORD n) { return ::SearchPathW(dirs.c_str(), name.c_str(), L".exe", n, b, nullptr); });
+    }
+    if (found.empty()) processError("cannot run " + argv0, ENOENT);
+    // Normalised as CreateProcess will see it (GetFullPathName also drops
+    // trailing dots and spaces, so "x.bat." is "x.bat").
+    found = fullPath(found);
+    const std::size_t dot = found.find_last_of(L'.');
+    std::wstring ext = dot == std::wstring::npos ? std::wstring() : found.substr(dot);
+    for (wchar_t& c : ext) c = static_cast<wchar_t>(std::towlower(c));
+    if (ext == L".bat" || ext == L".cmd")
+        throw Error(Error::Kind::InvalidArgument,
+                    "cannot run " + argv0 + ": batch files are refused (cmd.exe would interpret the arguments); "
+                    "run cmd.exe /c explicitly, with arguments safe for cmd",
+                    EINVAL);
+    return found;
+}
+
+// Starts a child whose standard handles are `in`, `out` and `err` (a null
+// one stays null in the child) and which inherits nothing else.
+//
+// The handles are not inheritable; inheritable duplicates are made here and
+// closed as soon as CreateProcessW returns, and only those, listed in
+// PROC_THREAD_ATTRIBUTE_HANDLE_LIST, reach the child. A CreateProcess that
+// another thread makes during that call with bInheritHandles and no handle
+// list (system(), _popen, a library) can inherit the duplicates too: that is
+// the residual window, the length of one CreateProcessW call.
 PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who, HANDLE in, HANDLE out, HANDLE err) {
     std::wstring cmd = commandLine(argv, who);
+    const std::wstring program = programPath(argv[0]);
+    HANDLE std3[3] = {in, out, err};
+    Handle dups[3];
     HANDLE list[3];
     DWORD n = 0;
-    for (HANDLE h : {in, out, err}) {
-        if (!h) continue;
-        bool seen = false;
-        for (DWORD i = 0; i < n; ++i) seen = seen || list[i] == h;
-        if (!seen) list[n++] = h;
+    for (int i = 0; i < 3; ++i) {
+        // One duplicate per distinct handle (out and err may be the same).
+        if (!std3[i] || std3[i] == INVALID_HANDLE_VALUE) {
+            std3[i] = nullptr;
+            continue;
+        }
+        int same = -1;
+        for (int j = 0; j < i; ++j)
+            if (std3[j] == std3[i]) same = j;
+        if (same >= 0) {
+            std3[i] = std3[same];  // already duplicated
+            continue;
+        }
+        HANDLE dup = nullptr;
+        if (!::DuplicateHandle(::GetCurrentProcess(), std3[i], ::GetCurrentProcess(), &dup, 0, TRUE,
+                               DUPLICATE_SAME_ACCESS))
+            lastError("cannot run " + argv[0]);
+        dups[i].h = dup;
+        std3[i] = dup;
+        list[n++] = dup;
     }
     SIZE_T size = 0;
     ::InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
@@ -123,34 +240,74 @@ PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who,
     STARTUPINFOEXW si{};
     si.StartupInfo.cb = sizeof si;
     si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-    si.StartupInfo.hStdInput = in;
-    si.StartupInfo.hStdOutput = out;
-    si.StartupInfo.hStdError = err;
+    si.StartupInfo.hStdInput = std3[0];
+    si.StartupInfo.hStdOutput = std3[1];
+    si.StartupInfo.hStdError = std3[2];
     si.lpAttributeList = attrs;
     PROCESS_INFORMATION pi{};
-    const BOOL ok = ::CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, n > 0, EXTENDED_STARTUPINFO_PRESENT,
-                                     nullptr, nullptr, &si.StartupInfo, &pi);
+    const BOOL ok = ::CreateProcessW(program.c_str(), cmd.data(), nullptr, nullptr, n > 0,
+                                     EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi);
     const DWORD e = ::GetLastError();
     ::DeleteProcThreadAttributeList(attrs);
+    for (Handle& d : dups) d.reset();
     if (!ok) processError("cannot run " + argv[0], win::errnoOfWin32(e));
     ::CloseHandle(pi.hThread);
     return pi;
 }
 
-// An inheritable pipe: `child` is the end the child gets.
+// A pipe whose ends are both non-inheritable: `child` is the end the child
+// gets (start passes it through an inheritable duplicate).
 void makePipe(Handle& parent, Handle& child, bool childReads) {
-    SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, TRUE};
     HANDLE r, w;
-    if (!::CreatePipe(&r, &w, &sa, 0)) lastError("cannot create pipes");
+    if (!::CreatePipe(&r, &w, nullptr, 0)) lastError("cannot create pipes");
     parent.h = childReads ? w : r;
     child.h = childReads ? r : w;
-    ::SetHandleInformation(parent.h, HANDLE_FLAG_INHERIT, 0);
+}
+
+// The exit code wait and run answer. A process that ended with an exception
+// has the exception's NTSTATUS code as its exit code (0xC0000005 for an
+// access violation, -1073741819 as an int); it is answered as 128 + the
+// POSIX signal (Linux numbers) for the same fault, as the shell answers for
+// a child that signal ended, so callers can test for a crash the same way on
+// every platform. Any other code is answered as it is.
+int exitCodeOf(DWORD code) {
+    constexpr int kSigInt = 2, kSigIll = 4, kSigTrap = 5, kSigAbrt = 6, kSigBus = 7, kSigFpe = 8, kSigSegv = 11;
+    switch (code) {
+        case 0xC0000005:  // STATUS_ACCESS_VIOLATION
+        case 0xC00000FD:  // STATUS_STACK_OVERFLOW
+        case 0xC000008C:  // STATUS_ARRAY_BOUNDS_EXCEEDED
+            return 128 + kSigSegv;
+        case 0xC0000006:  // STATUS_IN_PAGE_ERROR
+        case 0x80000002:  // STATUS_DATATYPE_MISALIGNMENT
+            return 128 + kSigBus;
+        case 0xC000013A:  // STATUS_CONTROL_C_EXIT
+            return 128 + kSigInt;
+        case 0xC000008D: case 0xC000008E: case 0xC000008F: case 0xC0000090:  // floating-point faults
+        case 0xC0000091: case 0xC0000092: case 0xC0000093:
+        case 0xC0000094:  // STATUS_INTEGER_DIVIDE_BY_ZERO
+        case 0xC0000095:  // STATUS_INTEGER_OVERFLOW
+        case 0xC00002B4: case 0xC00002B5:  // STATUS_FLOAT_MULTIPLE_FAULTS, _TRAPS
+            return 128 + kSigFpe;
+        case 0xC000001D:  // STATUS_ILLEGAL_INSTRUCTION
+        case 0xC0000096:  // STATUS_PRIVILEGED_INSTRUCTION
+            return 128 + kSigIll;
+        case 0x80000003:  // STATUS_BREAKPOINT
+        case 0x80000004:  // STATUS_SINGLE_STEP
+            return 128 + kSigTrap;
+        default:
+            break;
+    }
+    // Any other NTSTATUS error (0xC0000409, fail-fast, which abort() and
+    // buffer-overrun checks raise; 0xC0000374, heap corruption; ...): the
+    // process died abnormally.
+    if ((code & 0xC0000000u) == 0xC0000000u) return 128 + kSigAbrt;
+    return static_cast<int>(code);
 }
 
 int exitCodeOf(HANDLE process) {
     DWORD code = 0;
     if (!::GetExitCodeProcess(process, &code)) return -1;
-    return static_cast<int>(code);
+    return exitCodeOf(code);
 }
 
 void drain(HANDLE h, std::string& dst) {
@@ -179,28 +336,40 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
     errW.reset();
 
     RunResult res;
-    // Anonymous pipes cannot be polled: the input is fed and the standard
-    // error collected on threads of their own while this one reads the
-    // output. A child that exits without reading its input makes the write
-    // fail (ERROR_NO_DATA), which just ends the feeding.
-    std::thread feeder;
+    // Anonymous pipes cannot be polled: the standard error is collected and
+    // the input fed on threads of their own while this one reads the output.
+    // A child that exits without reading its input makes the write fail
+    // (ERROR_NO_DATA), which just ends the feeding.
     const std::string empty;
     const std::string& in = input ? *input : empty;
-    if (in.empty()) {
-        inW.reset();
-    } else {
-        feeder = std::thread([&] {
-            std::size_t done = 0;
-            while (done < in.size()) {
-                DWORD w = 0;
-                const DWORD want = static_cast<DWORD>(std::min<std::size_t>(in.size() - done, 1 << 20));
-                if (!::WriteFile(inW.h, in.data() + done, want, &w, nullptr)) break;
-                done += w;
-            }
-            inW.reset();
-        });
+    if (in.empty()) inW.reset();
+    std::thread errReader;
+    std::thread feeder;
+    try {
+        errReader = std::thread([&] { drain(errR.h, res.err); });
+        if (!in.empty()) {
+            feeder = std::thread([&] {
+                std::size_t done = 0;
+                while (done < in.size()) {
+                    DWORD w = 0;
+                    const DWORD want = static_cast<DWORD>(std::min<std::size_t>(in.size() - done, 1 << 20));
+                    if (!::WriteFile(inW.h, in.data() + done, want, &w, nullptr)) break;
+                    done += w;
+                }
+                inW.reset();
+            });
+        }
+    } catch (...) {
+        // A thread could not be started (std::system_error): run cannot go
+        // on. The child is ended first, so its pipes close and a thread that
+        // did start finishes; it is joined before the handles it uses go
+        // away (a joinable std::thread destroyed would call terminate).
+        ::TerminateProcess(proc.h, 128 + 9);
+        if (errReader.joinable()) errReader.join();
+        if (feeder.joinable()) feeder.join();
+        ::WaitForSingleObject(proc.h, INFINITE);
+        throw;
     }
-    std::thread errReader([&] { drain(errR.h, res.err); });
     drain(outR.h, res.out);
     errReader.join();
     if (feeder.joinable()) feeder.join();
@@ -212,18 +381,10 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
 int spawn(const std::vector<std::string>& argv) {
     if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "spawn: needs a command");
     std::fflush(nullptr);
-    // The child shares the caller's standard streams: inheritable duplicates
-    // of them (they may not be inheritable themselves).
-    Handle std3[3];
-    const DWORD ids[3] = {STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
-    for (int i = 0; i < 3; ++i) {
-        const HANDLE h = ::GetStdHandle(ids[i]);
-        if (!h || h == INVALID_HANDLE_VALUE) continue;
-        HANDLE dup = nullptr;
-        if (::DuplicateHandle(::GetCurrentProcess(), h, ::GetCurrentProcess(), &dup, 0, TRUE, DUPLICATE_SAME_ACCESS))
-            std3[i].h = dup;
-    }
-    PROCESS_INFORMATION pi = start(argv, "spawn", std3[0].h, std3[1].h, std3[2].h);
+    // The child shares the caller's standard streams (start passes them
+    // through inheritable duplicates).
+    PROCESS_INFORMATION pi = start(argv, "spawn", ::GetStdHandle(STD_INPUT_HANDLE), ::GetStdHandle(STD_OUTPUT_HANDLE),
+                                   ::GetStdHandle(STD_ERROR_HANDLE));
     const int id = static_cast<int>(pi.dwProcessId);
     std::lock_guard<std::mutex> lock(g_childMutex);
     g_children[id] = pi.hProcess;

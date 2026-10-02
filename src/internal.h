@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #ifdef _WIN32
 #include "platform_win.h"
@@ -99,6 +100,17 @@ std::string errorText(int err);
 [[noreturn]] void netError(int err, const std::string& what);
 
 // ------------------------------------------------------------- descriptors
+
+// Where closing a socket does not wake a thread waiting on it -- Windows
+// (WSAPoll), and macOS for listening and UDP sockets -- every wait that close
+// must be able to end also watches the waiting thread's Waker: a loopback UDP
+// socket on Windows, a pipe on macOS. close() signals the Waker of each
+// thread waiting on the descriptor, so the wait ends at once, with no
+// polling interval. Linux needs none: shutdown wakes every waiter there.
+#if defined(_WIN32) || defined(__APPLE__)
+#define PROTOIO_WAKERS 1
+struct Waker;
+#endif
 //
 // One state per descriptor (files, pipes, sockets, the standard streams): the
 // read-ahead buffer line reading needs and, for a socket upgraded to TLS, its
@@ -127,6 +139,10 @@ struct FdState {
     std::atomic<SSL*> ssl{nullptr};
     std::atomic<int> timeoutMs{-1};   // -1: block without limit
     std::atomic<bool> closed{false};
+#ifdef PROTOIO_WAKERS
+    std::mutex waitersMutex;
+    std::vector<Waker*> waiters;      // threads waiting on it; guarded by waitersMutex
+#endif
 
     FdState(int d, bool sock) : fd(d), isSocket(sock) {}
     ~FdState();
@@ -137,12 +153,16 @@ struct FdState {
 // The state of `fd`, created on first use.
 std::shared_ptr<FdState> fdState(int fd);
 
-// Waits until `fd` is ready for `events` within `timeoutMs` (-1: no limit).
-// False on timeout; true also on an error or hang-up, which the call that
-// follows reports. On Windows the wait also ends once `cancelled` (the
-// descriptor's `closed` flag) is set, because closing a socket there does
-// not wake a thread waiting on it; POSIX ignores it.
-bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled = nullptr);
+// Waits until the descriptor is ready for `events` within `timeoutMs` (-1: no
+// limit). False on timeout; true also on an error or hang-up, which the call
+// that follows reports, and once the descriptor is closed (close wakes the
+// wait at once). On Windows a descriptor that is not a socket is answered
+// ready at once: its reads wait in the read itself (see rawRead).
+bool waitReady(FdState& st, short events, int timeoutMs);
+
+// Ends the waits of the threads waiting on `st` (close calls it after
+// setting `closed`).
+void wakeWaiters(FdState& st);
 
 // Reads more input into the buffer; false at the end of the stream. The
 // caller holds readMutex.

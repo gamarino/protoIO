@@ -18,6 +18,10 @@ endif()
 option(PROTOIO_BUILD_TESTS "Build the GoogleTest suite" ${PROJECT_IS_TOP_LEVEL})
 option(PROTOIO_INSTALL "Generate install and packaging rules" ${PROJECT_IS_TOP_LEVEL})
 option(PROTOIO_TSAN "Build everything with ThreadSanitizer" OFF)
+# CI turns this on, so the library stays free of warnings (/W4 with MSVC,
+# -Wall -Wextra -Wpedantic elsewhere). Off by default: a newer compiler's new
+# warning must not break a runtime's build.
+option(PROTOIO_WARNINGS_AS_ERRORS "Treat the library's compiler warnings as errors" OFF)
 
 # The static library is linked into position-independent executables (the
 # default on Debian and Ubuntu), so its code must be position independent.
@@ -74,10 +78,14 @@ if(MSVC)
 else()
     target_compile_options(protoio PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+if(PROTOIO_WARNINGS_AS_ERRORS)
+    target_compile_options(protoio PRIVATE $<IF:$<CXX_COMPILER_ID:MSVC>,/WX,-Werror>)
+endif()
 # PUBLIC: consumers link the static archive, so they need its dependencies.
 target_link_libraries(protoio PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 if(WIN32)
-    target_link_libraries(protoio PUBLIC ws2_32)
+    # crypt32: the system certificate stores (net.cpp).
+    target_link_libraries(protoio PUBLIC ws2_32 crypt32)
 endif()
 
 # ---------------------------------------------------------------- package config

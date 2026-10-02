@@ -14,14 +14,14 @@
 #include <cstring>
 #include <unordered_map>
 
-#ifdef _WIN32
 #include <algorithm>
 #include <chrono>
 #include <climits>
+
+#ifdef _WIN32
 #include <io.h>
 #else
-#include <algorithm>
-#include <chrono>
+#include <fcntl.h>
 #include <pthread.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -114,55 +114,197 @@ std::shared_ptr<FdState> fdState(int fd) {
 
 // ------------------------------------------------------------------- waits
 
+namespace {
+
+// What is left of a timeout in milliseconds (-1: no limit).
+class Remaining {
+public:
+    explicit Remaining(int timeoutMs)
+        : unlimited_(timeoutMs < 0),
+          end_(std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs)) {}
+    int ms() const {
+        if (unlimited_) return -1;
+        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end_ - std::chrono::steady_clock::now());
+        return static_cast<int>(std::clamp<long long>(left.count(), 0, INT_MAX));
+    }
+
+private:
+    bool unlimited_;
+    std::chrono::steady_clock::time_point end_;
+};
+
+} // namespace
+
+#ifdef PROTOIO_WAKERS
+// A thread's wake-up channel (see PROTOIO_WAKERS in internal.h). It lives as
+// long as its thread; a thread registers it with a descriptor only for the
+// length of one wait, and close signals it under the same lock, so close
+// never signals a Waker that is gone.
+struct Waker {
 #ifdef _WIN32
-// Closing a socket on Windows does not wake a thread waiting on it, so a long
-// wait goes in slices and checks `cancelled` between them.
-bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled) {
-    const SOCKET s = win::socketOf(fd);
-    if (s == INVALID_SOCKET) return win::waitPipe(fd, events, timeoutMs, cancelled);
-    constexpr int kSliceMs = 50;
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
-    for (;;) {
-        if (cancelled && cancelled->load()) return true;
-        int slice = kSliceMs;
-        if (timeoutMs >= 0) {
-            const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
-            slice = static_cast<int>(std::clamp<long long>(left.count(), 0, kSliceMs));
+    SOCKET s = INVALID_SOCKET;
+    sockaddr_in addr{};
+
+    Waker() {
+        try {
+            win::initWinsock();
+        } catch (const Error&) {
+            return;
         }
-        WSAPOLLFD p{s, events, 0};
-        const int r = ::WSAPoll(&p, 1, slice);
-        if (r != 0) return true;  // ready, or an error the next call reports
-        if (timeoutMs >= 0 && std::chrono::steady_clock::now() >= end) return false;
+        s = ::WSASocketW(AF_INET, SOCK_DGRAM, IPPROTO_UDP, nullptr, 0, WSA_FLAG_NO_HANDLE_INHERIT);
+        if (s == INVALID_SOCKET) return;
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int len = sizeof addr;
+        if (::bind(s, reinterpret_cast<sockaddr*>(&addr), sizeof addr) != 0 ||
+            ::getsockname(s, reinterpret_cast<sockaddr*>(&addr), &len) != 0) {
+            ::closesocket(s);
+            s = INVALID_SOCKET;
+            return;
+        }
+        win::setNonBlocking(s, true);
+    }
+    ~Waker() {
+        if (s != INVALID_SOCKET) ::closesocket(s);
+    }
+    bool ok() const { return s != INVALID_SOCKET; }
+    void wake() { ::sendto(s, "w", 1, 0, reinterpret_cast<const sockaddr*>(&addr), sizeof addr); }
+    void drain() {
+        char b[16];
+        while (::recv(s, b, sizeof b, 0) > 0) {}
+    }
+    // Waits for `events` on `fd` or for a wake-up: > 0 when `fd` is ready
+    // (or failed), 0 on timeout, -1 when only the Waker was signalled.
+    int poll(SOCKET fd, short events, int timeoutMs) {
+        WSAPOLLFD p[2] = {{fd, events, 0}, {s, POLLIN, 0}};
+        const int r = ::WSAPoll(p, 2, timeoutMs);
+        if (r <= 0) return r < 0 ? 1 : 0;  // an error: the call that follows reports it
+        return p[0].revents ? 1 : -1;
+    }
+#else
+    int r = -1, w = -1;
+
+    Waker() {
+        int fds[2];
+        if (newPipe(fds) != 0) return;
+        r = fds[0];
+        w = fds[1];
+        ::fcntl(r, F_SETFL, ::fcntl(r, F_GETFL) | O_NONBLOCK);
+        ::fcntl(w, F_SETFL, ::fcntl(w, F_GETFL) | O_NONBLOCK);
+    }
+    ~Waker() {
+        if (r >= 0) ::close(r);
+        if (w >= 0) ::close(w);
+    }
+    bool ok() const { return r >= 0; }
+    void wake() { (void)!::write(w, "w", 1); }  // a full pipe already wakes the waiter
+    void drain() {
+        char b[64];
+        while (::read(r, b, sizeof b) > 0) {}
+    }
+    int poll(int fd, short events, int timeoutMs) {
+        pollfd p[2] = {{fd, events, 0}, {r, POLLIN, 0}};
+        int n;
+        while ((n = ::poll(p, 2, timeoutMs)) < 0 && errno == EINTR) {}
+        if (n <= 0) return n < 0 ? 1 : 0;
+        return p[0].revents ? 1 : -1;
+    }
+#endif
+    Waker(const Waker&) = delete;
+    Waker& operator=(const Waker&) = delete;
+};
+
+namespace {
+
+Waker* threadWaker() {
+    thread_local Waker waker;
+    return waker.ok() ? &waker : nullptr;
+}
+
+// Registers the calling thread's Waker with a descriptor for one wait.
+class WaitRegistration {
+public:
+    WaitRegistration(FdState& st, Waker* w) : st_(st), w_(w) {
+        std::lock_guard<std::mutex> lock(st_.waitersMutex);
+        st_.waiters.push_back(w_);
+    }
+    ~WaitRegistration() {
+        std::lock_guard<std::mutex> lock(st_.waitersMutex);
+        auto it = std::find(st_.waiters.begin(), st_.waiters.end(), w_);
+        if (it != st_.waiters.end()) st_.waiters.erase(it);
+    }
+    WaitRegistration(const WaitRegistration&) = delete;
+    WaitRegistration& operator=(const WaitRegistration&) = delete;
+
+private:
+    FdState& st_;
+    Waker* w_;
+};
+
+// Waits on `fd` and on the thread's Waker. Without a Waker (its socket or
+// pipe could not be created) the wait goes in 50 ms slices and checks
+// `closed` between them.
+template <typename Native, typename SlicePoll>
+bool waitWaking(FdState& st, Native fd, short events, int timeoutMs, SlicePoll slicePoll) {
+    const Remaining left(timeoutMs);
+    Waker* w = threadWaker();
+    if (!w) {
+        constexpr int kSliceMs = 50;
+        for (;;) {
+            if (st.closed.load()) return true;
+            const int ms = left.ms();
+            if (ms == 0) return false;
+            if (slicePoll(fd, events, ms < 0 ? kSliceMs : std::min(ms, kSliceMs))) return true;
+        }
+    }
+    WaitRegistration registration(st, w);
+    for (;;) {
+        // Checked after registering: a close that came first is seen here, a
+        // later one signals the Waker.
+        if (st.closed.load()) return true;
+        const int r = w->poll(fd, events, left.ms());
+        if (r > 0) return true;
+        if (r == 0) return false;
+        w->drain();
     }
 }
+
+} // namespace
+
+void wakeWaiters(FdState& st) {
+    std::lock_guard<std::mutex> lock(st.waitersMutex);
+    for (Waker* w : st.waiters) w->wake();
+}
 #else
-bool waitReady(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled) {
-    pollfd p{fd, events, 0};
+void wakeWaiters(FdState&) {}  // shutdown wakes every waiter
+#endif
+
+#ifdef _WIN32
+bool waitReady(FdState& st, short events, int timeoutMs) {
+    const SOCKET s = win::socketOf(st.fd);
+    if (s == INVALID_SOCKET) return true;  // not a socket: rawRead waits in the read
+    return waitWaking(st, s, events, timeoutMs, [](SOCKET fd, short ev, int ms) {
+        WSAPOLLFD p{fd, ev, 0};
+        return ::WSAPoll(&p, 1, ms) != 0;
+    });
+}
+#else
+bool waitReady(FdState& st, short events, int timeoutMs) {
 #if defined(__APPLE__)
     // On Linux, close's shutdown wakes a thread polling any socket. On macOS it
-    // wakes none on a listening or a UDP socket (shutdown answers ENOTCONN), so
-    // a caller that can be cancelled waits in slices and checks the flag.
-    if (cancelled) {
-        constexpr int kSliceMs = 50;
-        const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs);
-        for (;;) {
-            if (cancelled->load()) return true;
-            int slice = kSliceMs;
-            if (timeoutMs >= 0) {
-                const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
-                slice = static_cast<int>(std::clamp<long long>(left.count(), 0, kSliceMs));
-            }
-            const int r = ::poll(&p, 1, slice);
-            if (r < 0 && errno == EINTR) continue;
-            if (r != 0) return true;  // ready, or an error the next call reports
-            if (timeoutMs >= 0 && std::chrono::steady_clock::now() >= end) return false;
-        }
+    // wakes none on a listening or a UDP socket (shutdown answers ENOTCONN).
+    if (st.isSocket) {
+        return waitWaking(st, st.fd, events, timeoutMs, [](int fd, short ev, int ms) {
+            pollfd p{fd, ev, 0};
+            const int r = ::poll(&p, 1, ms);
+            return r != 0 && !(r < 0 && errno == EINTR);
+        });
     }
-#else
-    (void)cancelled;
 #endif
+    pollfd p{st.fd, events, 0};
+    const Remaining left(timeoutMs);
     for (;;) {
-        const int r = ::poll(&p, 1, timeoutMs);
+        const int r = ::poll(&p, 1, left.ms());
         if (r < 0 && errno == EINTR) continue;
         return r != 0;
     }
@@ -193,7 +335,7 @@ int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
         if (r > 0) return r;
         if (e == SSL_ERROR_ZERO_RETURN) return 0;
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            if (!waitReady(st.fd, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, st.timeoutMs.load(), &st.closed)) {
+            if (!waitReady(st, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, st.timeoutMs.load())) {
                 errno = ETIMEDOUT;
                 return -1;
             }
@@ -220,23 +362,20 @@ ssize_t rawRead(FdState& st, char* out, std::size_t n) {
         }, &b);
     }
 #ifdef _WIN32
-    if (!waitReady(st.fd, POLLIN, st.timeoutMs.load(), &st.closed)) { errno = ETIMEDOUT; return -1; }
+    if (!st.isSocket) return win::readDescriptor(st.fd, out, n, st.timeoutMs.load());
+    if (!waitReady(st, POLLIN, st.timeoutMs.load())) { errno = ETIMEDOUT; return -1; }
     if (st.closed.load()) return 0;  // closed meanwhile: the end, as a shut-down socket answers on POSIX
     const int want = static_cast<int>(std::min<std::size_t>(n, INT_MAX));
-    if (st.isSocket) {
-        const int r = ::recv(win::socketOf(st.fd), out, want, 0);
-        if (r == SOCKET_ERROR) {
-            const int e = ::WSAGetLastError();
-            if (e == WSAESHUTDOWN) return 0;
-            errno = win::errnoOfWsa(e);
-            return -1;
-        }
-        return r;
+    const int r = ::recv(win::socketOf(st.fd), out, want, 0);
+    if (r == SOCKET_ERROR) {
+        const int e = ::WSAGetLastError();
+        if (e == WSAESHUTDOWN) return 0;
+        errno = win::errnoOfWsa(e);
+        return -1;
     }
-    win::QuietCrt quiet;
-    return ::_read(st.fd, out, static_cast<unsigned>(want));  // binary descriptors: bytes as they are
+    return r;
 #else
-    if (!waitReady(st.fd, POLLIN, st.timeoutMs.load(), &st.closed)) { errno = ETIMEDOUT; return -1; }
+    if (!waitReady(st, POLLIN, st.timeoutMs.load())) { errno = ETIMEDOUT; return -1; }
     for (;;) {
         const ssize_t r = ::read(st.fd, out, n);
         if (r < 0 && errno == EINTR) continue;
@@ -266,7 +405,7 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
             w = r;
         } else {
 #ifdef _WIN32
-            if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load(), &st.closed)) netError(ETIMEDOUT, "write");
+            if (!waitReady(st, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
             const int want = static_cast<int>(std::min<std::size_t>(size - done, 1 << 30));
             if (st.isSocket) {
                 const int r = ::send(win::socketOf(st.fd), data + done, want, 0);
@@ -291,7 +430,7 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
                 w = r;
             }
 #else
-            if (!waitReady(st.fd, POLLOUT, st.timeoutMs.load(), &st.closed)) netError(ETIMEDOUT, "write");
+            if (!waitReady(st, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
             w = st.isSocket ? ::send(st.fd, data + done, size - done, detail::kNoSigpipe)
                             : ::write(st.fd, data + done, size - done);
             if (w < 0) {
@@ -453,6 +592,7 @@ void close(int fd) {
         return;
     }
     if (st->closed.exchange(true)) return;
+    detail::wakeWaiters(*st);
     if (SSL* ssl = st->ssl.load()) {
         // One attempt at close_notify; the socket is non-blocking.
         SigpipeGuard noSigpipe;
@@ -463,7 +603,6 @@ void close(int fd) {
     // which a bare close does not. The descriptor is closed by the state's
     // destructor, when its last user lets it go.
 #ifdef _WIN32
-    // (On Windows a waiting thread notices `closed` within its wait slice.)
     if (st->isSocket) ::shutdown(detail::win::socketOf(fd), SD_BOTH);
 #else
     if (st->isSocket) ::shutdown(fd, SHUT_RDWR);

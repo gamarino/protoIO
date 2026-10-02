@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <cstring>
 #include <mutex>
 #include <system_error>
 #include <unordered_map>
@@ -139,27 +140,141 @@ int errnoOfWin32(unsigned long e) {
     return c.category() == std::generic_category() ? c.value() : EIO;
 }
 
-// ------------------------------------------------------------------- pipes
+// --------------------------------------------------------- descriptor reads
 
-bool waitPipe(int fd, short events, int timeoutMs, const std::atomic<bool>* cancelled) {
-    if (!(events & POLLIN) || timeoutMs < 0) return true;
-    intptr_t h;
+namespace {
+
+// A real handle to the calling thread (GetCurrentThread answers a pseudo
+// handle, which means "the caller" to whichever thread uses it), for
+// CancelSynchronousIo from the timer thread.
+HANDLE currentThread() {
+    struct Own {
+        HANDLE h = nullptr;
+        Own() {
+            ::DuplicateHandle(::GetCurrentProcess(), ::GetCurrentThread(), ::GetCurrentProcess(), &h, 0, FALSE,
+                              DUPLICATE_SAME_ACCESS);
+        }
+        ~Own() {
+            if (h) ::CloseHandle(h);
+        }
+    };
+    thread_local Own own;
+    return own.h;
+}
+
+// While alive, cancels the calling thread's blocking I/O once `timeoutMs`
+// have passed. The timer callback cancels again (every millisecond) until the
+// I/O is over, which covers a deadline that falls just before the I/O call
+// starts; the destructor stops the timer and waits for a running callback,
+// so no later I/O of the thread can be cancelled by it.
+class IoDeadline {
+public:
+    explicit IoDeadline(int timeoutMs) {
+        if (timeoutMs < 0) return;
+        shared_.thread = currentThread();
+        if (!shared_.thread) return;
+        timer_ = ::CreateThreadpoolTimer(&IoDeadline::onTimer, &shared_, nullptr);
+        if (!timer_) return;
+        // A relative due time: negative, in 100 ns units.
+        ULARGE_INTEGER due;
+        due.QuadPart = static_cast<ULONGLONG>(-(static_cast<LONGLONG>(timeoutMs) * 10000));
+        FILETIME ft;
+        ft.dwLowDateTime = due.LowPart;
+        ft.dwHighDateTime = due.HighPart;
+        ::SetThreadpoolTimer(timer_, &ft, 0, 0);
+    }
+    ~IoDeadline() {
+        if (!timer_) return;
+        shared_.done.store(true);
+        ::SetThreadpoolTimer(timer_, nullptr, 0, 0);
+        ::WaitForThreadpoolTimerCallbacks(timer_, TRUE);
+        ::CloseThreadpoolTimer(timer_);
+    }
+    bool expired() const { return shared_.fired.load(); }
+    IoDeadline(const IoDeadline&) = delete;
+    IoDeadline& operator=(const IoDeadline&) = delete;
+
+private:
+    struct Shared {
+        HANDLE thread = nullptr;
+        std::atomic<bool> fired{false};
+        std::atomic<bool> done{false};
+    };
+
+    static void CALLBACK onTimer(PTP_CALLBACK_INSTANCE, void* context, PTP_TIMER) {
+        auto* shared = static_cast<Shared*>(context);
+        shared->fired.store(true);
+        while (!shared->done.load() && !::CancelSynchronousIo(shared->thread)) ::Sleep(1);
+    }
+
+    Shared shared_;
+    PTP_TIMER timer_ = nullptr;
+};
+
+bool isHighSurrogate(wchar_t c) { return c >= 0xD800 && c <= 0xDBFF; }
+
+} // namespace
+
+ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs) {
+    HANDLE h;
     {
         QuietCrt quiet;
-        h = ::_get_osfhandle(fd);
+        h = reinterpret_cast<HANDLE>(::_get_osfhandle(fd));
     }
-    if (h == -1 || ::GetFileType(reinterpret_cast<HANDLE>(h)) != FILE_TYPE_PIPE) return true;
-    const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    if (h == INVALID_HANDLE_VALUE || h == nullptr) {
+        errno = EBADF;
+        return -1;
+    }
+    DWORD consoleMode = 0;
+    const bool console = ::GetConsoleMode(h, &consoleMode) != 0;
+    const DWORD type = ::GetFileType(h);
+    const bool mayBlock = console || type == FILE_TYPE_PIPE || type == FILE_TYPE_CHAR;
     for (;;) {
-        DWORD avail = 0;
-        // A failure (the writer is gone) is answered as ready: the read that
-        // follows reports the end of the stream.
-        if (!::PeekNamedPipe(reinterpret_cast<HANDLE>(h), nullptr, 0, nullptr, &avail, nullptr) || avail > 0)
-            return true;
-        if (cancelled && cancelled->load()) return true;
-        const auto left = std::chrono::duration_cast<std::chrono::milliseconds>(end - std::chrono::steady_clock::now());
-        if (left.count() <= 0) return false;
-        ::Sleep(static_cast<DWORD>(std::min<long long>(left.count(), 5)));
+        IoDeadline deadline(mayBlock ? timeoutMs : -1);
+        BOOL ok;
+        DWORD got = 0;
+        std::wstring units;
+        if (console) {
+            // Three UTF-8 bytes at most per UTF-16 unit, and room for the
+            // second half of a surrogate pair read below (the caller reads
+            // in 64 KiB chunks).
+            if (n < 16) {
+                errno = EINVAL;
+                return -1;
+            }
+            units.resize(std::min<std::size_t>((n - 4) / 3, 4096));
+            ok = ::ReadConsoleW(h, units.data(), static_cast<DWORD>(units.size()), &got, nullptr);
+            // A character outside the BMP may arrive in two reads: its second
+            // half is already in the console's buffer.
+            if (ok && got > 0 && isHighSurrogate(units[got - 1])) {
+                units.resize(got + 1);
+                DWORD more = 0;
+                ok = ::ReadConsoleW(h, units.data() + got, 1, &more, nullptr);
+                got += more;
+            }
+        } else {
+            ok = ::ReadFile(h, out, static_cast<DWORD>(std::min<std::size_t>(n, 1u << 30)), &got, nullptr);
+        }
+        const DWORD err = ok ? ERROR_SUCCESS : ::GetLastError();
+        const bool expired = deadline.expired();
+        if (!ok) {
+            if (err == ERROR_OPERATION_ABORTED) {
+                if (expired) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
+                continue;  // cancelled by someone else (Ctrl+C on a console): read again, as POSIX does after EINTR
+            }
+            if (err == ERROR_BROKEN_PIPE || err == ERROR_HANDLE_EOF) return 0;  // the writer is gone
+            errno = errnoOfWin32(err);
+            return -1;
+        }
+        if (!console) return static_cast<ssize_t>(got);
+        if (got == 0) return 0;
+        if (units[0] == 0x1A) return 0;  // Ctrl+Z at the start of a line: the end, as the C runtime reads it
+        const std::string bytes = narrow(units.substr(0, got));
+        std::memcpy(out, bytes.data(), bytes.size());
+        return static_cast<ssize_t>(bytes.size());
     }
 }
 

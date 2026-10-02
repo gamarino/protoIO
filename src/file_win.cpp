@@ -13,8 +13,11 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <system_error>
+#include <vector>
 
 #include <direct.h>
 #include <fcntl.h>
@@ -49,14 +52,51 @@ bool isDirectory(const std::string& path) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-// _wopen; a directory answers EISDIR, as open(2) does for writing (the C
-// runtime says EACCES).
+// FILE_RENAME_INFO as FileRenameInfoEx takes it (Windows 10 1607 and later),
+// spelled out: older SDKs, and SDKs targeting an older Windows, lack the
+// Flags member, the class and the flags.
+struct RenameInfoEx {
+    DWORD Flags;
+    HANDLE RootDirectory;
+    DWORD FileNameLength;
+    WCHAR FileName[1];
+};
+constexpr auto kFileRenameInfoEx = static_cast<FILE_INFO_BY_HANDLE_CLASS>(22);
+constexpr DWORD kRenameReplaceIfExists = 0x1;
+constexpr DWORD kRenamePosixSemantics = 0x2;
+
+// Opens `path` as open(2) does, answering a C runtime descriptor in binary
+// mode, or -1 with errno set; a directory answers EISDIR, as open(2) does for
+// writing (Windows says access denied).
+//
+// CreateFileW with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+// not _wsopen: the C runtime never asks for delete sharing, so a file a
+// stream had open could not be deleted or renamed, nor replaced by a rename,
+// which POSIX programs (and the atomic-save pattern) take for granted. The
+// handle is not inheritable, like a descriptor opened with O_CLOEXEC.
 int openPath(const std::string& path, int flags) {
-    int fd = -1;
-    const errno_t rc = ::_wsopen_s(&fd, win::widen(path).c_str(), flags | _O_BINARY | _O_NOINHERIT, _SH_DENYNO,
-                                   _S_IREAD | _S_IWRITE);
-    if (rc != 0) {
-        errno = rc == EACCES && isDirectory(path) ? EISDIR : rc;
+    DWORD access = 0;
+    switch (flags & (_O_RDONLY | _O_WRONLY | _O_RDWR)) {
+        case _O_WRONLY: access = GENERIC_WRITE; break;
+        case _O_RDWR: access = GENERIC_READ | GENERIC_WRITE; break;
+        default: access = GENERIC_READ; break;
+    }
+    DWORD disposition = OPEN_EXISTING;
+    if (flags & _O_CREAT) disposition = (flags & _O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS;
+    else if (flags & _O_TRUNC) disposition = TRUNCATE_EXISTING;
+    const HANDLE h = ::CreateFileW(win::widen(path).c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        const DWORD e = ::GetLastError();
+        errno = e == ERROR_ACCESS_DENIED && isDirectory(path) ? EISDIR : win::errnoOfWin32(e);
+        return -1;
+    }
+    // _O_APPEND: the C runtime moves to the end before each write.
+    const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(h), flags & _O_APPEND);
+    if (fd < 0) {
+        const int e = errno;
+        ::CloseHandle(h);
+        errno = e;
         return -1;
     }
     return fd;
@@ -142,11 +182,48 @@ bool remove(const std::string& path, bool recursive) {
 }
 
 void move(const std::string& from, const std::string& to) {
-    try {
-        fs::rename(pathOf(from), pathOf(to));
-    } catch (const fs::filesystem_error& e) {
-        fsError(e, "cannot move");
+    // As rename(2): an existing target is replaced, even while a stream has
+    // it open, and the source may be open too. SetFileInformationByHandle
+    // with POSIX semantics does that (Windows 10 1709 and later, NTFS);
+    // elsewhere MoveFileExW replaces a target nobody has open.
+    const std::wstring wfrom = win::widen(from);
+    const std::wstring wto = win::widen(to);
+    const HANDLE h = ::CreateFileW(wfrom.c_str(), DELETE | SYNCHRONIZE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                   FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) fileError(from, win::errnoOfWin32(::GetLastError()), "cannot move");
+    // The new name as a full path, inside a FILE_RENAME_INFO of its size.
+    std::wstring target(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = ::GetFullPathNameW(wto.c_str(), static_cast<DWORD>(target.size()), target.data(), nullptr);
+        if (n == 0) {
+            const DWORD e = ::GetLastError();
+            ::CloseHandle(h);
+            fileError(to, win::errnoOfWin32(e), "cannot move");
+        }
+        if (n < target.size()) {
+            target.resize(n);
+            break;
+        }
+        target.resize(n + 1);
     }
+    const std::size_t bytes = offsetof(RenameInfoEx, FileName) + (target.size() + 1) * sizeof(wchar_t);
+    std::vector<unsigned char> buf(bytes, 0);
+    auto* info = reinterpret_cast<RenameInfoEx*>(buf.data());
+    info->Flags = kRenameReplaceIfExists | kRenamePosixSemantics;
+    info->RootDirectory = nullptr;
+    info->FileNameLength = static_cast<DWORD>(target.size() * sizeof(wchar_t));
+    std::memcpy(info->FileName, target.c_str(), (target.size() + 1) * sizeof(wchar_t));
+    BOOL ok = ::SetFileInformationByHandle(h, kFileRenameInfoEx, info, static_cast<DWORD>(bytes));
+    DWORD e = ok ? ERROR_SUCCESS : ::GetLastError();
+    ::CloseHandle(h);
+    if (!ok && (e == ERROR_INVALID_PARAMETER || e == ERROR_NOT_SUPPORTED || e == ERROR_INVALID_FUNCTION)) {
+        // No POSIX rename here (an older Windows, or a file system such as FAT).
+        ok = ::MoveFileExW(wfrom.c_str(), wto.c_str(), MOVEFILE_REPLACE_EXISTING);
+        e = ok ? ERROR_SUCCESS : ::GetLastError();
+    }
+    if (!ok) fileError(e == ERROR_FILE_NOT_FOUND ? from : to, e == ERROR_NOT_SAME_DEVICE ? EXDEV : win::errnoOfWin32(e),
+                       "cannot move");
 }
 
 void copy(const std::string& from, const std::string& to) {
