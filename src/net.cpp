@@ -155,25 +155,34 @@ void resolve(const std::string& host, int port, int socktype, bool passive, Addr
     const std::string service = std::to_string(port);
     const int r = ::getaddrinfo(host.empty() ? nullptr : host.c_str(), service.c_str(), &hints, &out.head);
     if (r != 0) throw Error(Error::Kind::NameLookup, "cannot resolve " + host + ": " + ::gai_strerror(r));
-#if defined(_WIN32) || defined(__APPLE__)
     // The wildcard address: glibc answers 0.0.0.0 before ::, Windows and macOS
-    // the other way round. A Windows IPv6 socket is IPv6-only by default, so
-    // binding the first answer left 127.0.0.1 refused; a macOS one takes IPv4
-    // peers as ::ffff:a.b.c.d. Put the IPv4 answers first, as on Linux. (Every
-    // node stays in the list, so freeaddrinfo frees them all.)
+    // the other way round. Put :: first on every platform: tcpListen makes it
+    // a dual-stack socket (IPV6_V6ONLY off), which takes IPv4 and IPv6 peers
+    // alike, and falls back to 0.0.0.0 where the host has no IPv6. Binding
+    // 0.0.0.0 alone refused ::1, which "localhost" names first on Windows and
+    // macOS. (Every node stays in the list, so freeaddrinfo frees them all.)
     if (passive && host.empty() && out.head) {
-        addrinfo *v4 = nullptr, **v4Tail = &v4, *rest = nullptr, **restTail = &rest;
+        addrinfo *v6 = nullptr, **v6Tail = &v6, *rest = nullptr, **restTail = &rest;
         for (addrinfo* ai = out.head; ai;) {
             addrinfo* next = ai->ai_next;
             ai->ai_next = nullptr;
-            if (ai->ai_family == AF_INET) { *v4Tail = ai; v4Tail = &ai->ai_next; }
+            if (ai->ai_family == AF_INET6) { *v6Tail = ai; v6Tail = &ai->ai_next; }
             else { *restTail = ai; restTail = &ai->ai_next; }
             ai = next;
         }
-        *v4Tail = rest;
-        out.head = v4 ? v4 : rest;
+        *v6Tail = rest;
+        out.head = v6 ? v6 : rest;
     }
-#endif
+}
+
+// Makes `ai`'s IPv6 socket dual-stack when it is the wildcard listener's
+// (see resolve); false when the platform refuses, and the caller then tries
+// the next address. Every other socket is left as it is.
+template <typename Socket>
+bool dualStackIfWildcard(Socket s, const std::string& host, const addrinfo* ai) {
+    if (!host.empty() || ai->ai_family != AF_INET6) return true;
+    int off = 0;
+    return ::setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, reinterpret_cast<const char*>(&off), sizeof off) == 0;
 }
 
 Address addressOf(const sockaddr* sa) {
@@ -185,7 +194,13 @@ Address addressOf(const sockaddr* sa) {
         a.port = ntohs(in->sin_port);
     } else if (sa->sa_family == AF_INET6) {
         auto* in = reinterpret_cast<const sockaddr_in6*>(sa);
-        ::inet_ntop(AF_INET6, &in->sin6_addr, host, sizeof host);
+        if (IN6_IS_ADDR_V4MAPPED(&in->sin6_addr)) {
+            // An IPv4 peer of a dual-stack socket (::ffff:a.b.c.d): answered
+            // as the IPv4 address it is.
+            ::inet_ntop(AF_INET, reinterpret_cast<const unsigned char*>(&in->sin6_addr) + 12, host, sizeof host);
+        } else {
+            ::inet_ntop(AF_INET6, &in->sin6_addr, host, sizeof host);
+        }
         a.port = ntohs(in->sin6_port);
     }
     a.host = host;
@@ -385,7 +400,8 @@ int tcpListen(const std::string& host, int port, int backlog) {
         // no other socket may bind the port while this one has it, not even
         // one that sets SO_REUSEADDR (which would take the port over).
         setFlag(s, SO_EXCLUSIVEADDRUSE);
-        if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 && ::listen(s, backlog) == 0) {
+        if (dualStackIfWildcard(s, host, ai) && ::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0 &&
+            ::listen(s, backlog) == 0) {
             win::setNonBlocking(s, true);  // see tcpAccept
             break;
         }
@@ -589,7 +605,8 @@ int tcpListen(const std::string& host, int port, int backlog) {
         if (fd < 0) { lastErr = errno; continue; }
         int one = 1;
         ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-        if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 && ::listen(fd, backlog) == 0) {
+        if (dualStackIfWildcard(fd, host, ai) && ::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0 &&
+            ::listen(fd, backlog) == 0) {
             ::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);  // see tcpAccept
             break;
         }

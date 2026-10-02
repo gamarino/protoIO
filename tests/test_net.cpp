@@ -151,6 +151,37 @@ TEST(Net, WildcardListenerAcceptsIpv4Loopback) {
     protoio::close(listener);
 }
 
+// The wildcard listener takes IPv6 connections too, on one dual-stack socket
+// where the host has IPv6. "localhost" names ::1 first on Windows and macOS,
+// so a client of a server listening on every interface must not be refused
+// there first (on Windows that cost each connection about 0.3 s).
+TEST(Net, WildcardListenerAcceptsIpv6Loopback) {
+    if (auto why = ipv6LoopbackUnusable()) GTEST_SKIP() << *why;
+    const int listener = net::tcpListen("", 0);
+    const int port = net::sockName(listener).port;
+    ASSERT_GT(port, 0);
+    std::thread server([&] {
+        auto c = net::tcpAccept(listener, 5000);
+        ASSERT_TRUE(c);
+        EXPECT_EQ(net::peerName(*c).host, "::1");
+        protoio::write(*c, "six\n");
+        protoio::close(*c);
+    });
+    std::optional<int> s;
+    try {
+        s = net::tcpConnect("::1", port, 2000);
+    } catch (const Error& e) {
+        ADD_FAILURE() << "the wildcard listener refused ::1: " << e.what();
+        protoio::close(net::tcpConnect("127.0.0.1", port, 2000));  // let the server finish
+    }
+    if (s) {
+        EXPECT_EQ(protoio::readLine(*s), "six");
+        protoio::close(*s);
+    }
+    server.join();
+    protoio::close(listener);
+}
+
 TEST(Net, AcceptTimeoutAnswersNullopt) {
     const int listener = net::tcpListen("127.0.0.1", 0);
     const auto start = std::chrono::steady_clock::now();

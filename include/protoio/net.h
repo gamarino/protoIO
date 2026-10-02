@@ -26,8 +26,10 @@ struct Address {
 // close-on-exec and has TCP_NODELAY set.
 int tcpConnect(const std::string& host, int port, int timeoutMs = -1);
 
-// Listens on host:port (an empty host: every interface; port 0: a free port,
-// see sockName). SO_REUSEADDR is set; on Windows, where it would let another
+// Listens on host:port (port 0: a free port, see sockName). An empty host is
+// every interface, IPv4 and IPv6: one IPv6 socket with IPV6_V6ONLY off, whose
+// IPv4 peers sockName and peerName answer as plain IPv4 addresses, or an IPv4
+// socket on 0.0.0.0 where the host has no IPv6. SO_REUSEADDR is set; on Windows, where it would let another
 // socket take the port over, SO_EXCLUSIVEADDRUSE is set instead.
 int tcpListen(const std::string& host, int port, int backlog = 128);
 
