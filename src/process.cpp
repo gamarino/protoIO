@@ -23,6 +23,13 @@
 
 extern char** environ;
 
+// posix_spawn_file_actions_addchdir_np: glibc 2.29, musl 1.1.24, macOS 10.15.
+#if defined(__APPLE__) || (defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 29)))
+#define PROTOIO_HAS_SPAWN_CHDIR 1
+#else
+#define PROTOIO_HAS_SPAWN_CHDIR 0
+#endif
+
 namespace protoio::process {
 
 namespace {
@@ -49,7 +56,30 @@ std::vector<char*> argvOf(const std::vector<std::string>& argv, const char* who)
 } // namespace
 
 RunResult run(const std::vector<std::string>& argv, const std::optional<std::string>& input) {
+    RunOptions options;
+    options.input = input;
+    return run(argv, options);
+}
+
+RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
     std::vector<char*> args = argvOf(argv, "run");
+    const std::optional<std::string>& input = options.input;
+    // The child's environment: the caller's, or the one given. posix_spawnp
+    // searches the caller's PATH either way (it reads PATH in the caller).
+    std::vector<std::string> envStrings;
+    std::vector<char*> envp;
+    char** childEnv = environ;
+    if (options.environment) {
+        envStrings.reserve(options.environment->size());
+        for (const auto& [name, value] : *options.environment) {
+            if (name.empty() || name.find('=') != std::string::npos)
+                throw Error(Error::Kind::InvalidArgument, "run: invalid environment variable name: " + name, EINVAL);
+            envStrings.push_back(name + "=" + value);
+        }
+        for (std::string& e : envStrings) envp.push_back(e.data());
+        envp.push_back(nullptr);
+        childEnv = envp.data();
+    }
     int inP[2] = {-1, -1}, outP[2] = {-1, -1}, errP[2] = {-1, -1};
     if (detail::newPipe(inP) || detail::newPipe(outP) || detail::newPipe(errP)) {
         const int e = errno;
@@ -61,8 +91,23 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
     posix_spawn_file_actions_adddup2(&fa, inP[0], 0);
     posix_spawn_file_actions_adddup2(&fa, outP[1], 1);
     posix_spawn_file_actions_adddup2(&fa, errP[1], 2);
+    int rc = 0;
+    if (options.directory) {
+        // Performed in the child before exec.
+#if PROTOIO_HAS_SPAWN_CHDIR
+        rc = ::posix_spawn_file_actions_addchdir_np(&fa, options.directory->c_str());
+#else
+        rc = ENOSYS;
+#endif
+    }
+    // A program named with a relative directory is taken from the child's
+    // directory. glibc's exec would find it there after the chdir anyway;
+    // macOS's posix_spawnp checks the path before, in the caller's directory.
+    std::string program = argv[0];
+    if (options.directory && program.find('/') != std::string::npos && program[0] != '/')
+        program = *options.directory + "/" + program;
     pid_t pid;
-    const int rc = ::posix_spawnp(&pid, args[0], &fa, nullptr, args.data(), environ);
+    if (rc == 0) rc = ::posix_spawnp(&pid, program.c_str(), &fa, nullptr, args.data(), childEnv);
     posix_spawn_file_actions_destroy(&fa);
     ::close(inP[0]);
     ::close(outP[1]);
@@ -71,7 +116,7 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
         ::close(inP[1]);
         ::close(outP[0]);
         ::close(errP[0]);
-        processError("cannot run " + argv[0], rc);
+        processError("cannot run " + argv[0] + (options.directory ? " in " + *options.directory : std::string()), rc);
     }
     RunResult res;
     // A child that exits without reading all its input must not kill us.

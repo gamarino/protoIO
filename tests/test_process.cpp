@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <csignal>
+#include <filesystem>
 #include <optional>
 #include <thread>
 #include <vector>
@@ -14,6 +15,7 @@
 #ifdef _WIN32
 #include <process.h>
 #else
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -314,6 +316,108 @@ TEST(Process, SpawnWaitKill) {
         EXPECT_EQ(e.kind, Error::Kind::Process);
         EXPECT_EQ(e.sysErrno, ECHILD);
     }
+}
+
+// A UTF-8 path as a std::filesystem::path.
+std::filesystem::path fsPath(const std::string& utf8) {
+    return std::filesystem::path(std::u8string(utf8.begin(), utf8.end()));
+}
+
+// RunOptions::directory: the child starts in that directory.
+TEST(Process, RunInADirectory) {
+    protoio_test::TempDir d;
+    process::RunOptions options;
+    options.directory = d.path;
+#ifdef _WIN32
+    auto r = process::run({PROTOIO_TESTCHILD, "cwd"}, options);
+#else
+    auto r = process::run({"pwd", "-P"}, options);
+#endif
+    ASSERT_EQ(r.exitCode, 0) << r.err;
+    while (!r.out.empty() && (r.out.back() == '\n' || r.out.back() == '\r')) r.out.pop_back();
+    // Compared as files: the temporary directory may be reached through a
+    // symbolic link (macOS) or an 8.3 short name (Windows).
+    EXPECT_TRUE(std::filesystem::equivalent(fsPath(r.out), fsPath(d.path)))
+        << r.out << " vs " << d.path;
+    // The caller's own working directory is unchanged.
+    EXPECT_FALSE(std::filesystem::equivalent(fsPath(file::cwd()), fsPath(d.path)));
+}
+
+// A program named with a relative directory is found from the child's
+// working directory, as exec finds it after the child changed directory.
+TEST(Process, ARelativeProgramPathIsResolvedInTheChildsDirectory) {
+    protoio_test::TempDir d;
+    file::mkdir(d / "bin");
+#ifdef _WIN32
+    file::copy(PROTOIO_TESTCHILD, d / "bin/child.exe");
+    const std::vector<std::string> argv = {"bin\\child", "print", "here", "", "5"};
+#else
+    file::write(d / "bin/child", "#!/bin/sh\nprintf here\nexit 5\n");
+    ASSERT_EQ(::chmod((d / "bin/child").c_str(), 0755), 0);
+    const std::vector<std::string> argv = {"./bin/child"};
+#endif
+    process::RunOptions options;
+    options.directory = d.path;
+    auto r = process::run(argv, options);
+    EXPECT_EQ(r.exitCode, 5) << r.err;
+    EXPECT_EQ(r.out, "here");
+}
+
+TEST(Process, AMissingDirectoryThrowsProcess) {
+    protoio_test::TempDir d;
+    process::RunOptions options;
+    options.directory = d / "missing";
+    try {
+        process::run(kTrue, options);
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::Process) << e.what();
+        EXPECT_EQ(e.sysErrno, ENOENT) << e.what();
+    }
+}
+
+// RunOptions::environment replaces the caller's environment; the program is
+// still found through the caller's PATH, which the child does not get.
+TEST(Process, RunWithAReplacedEnvironment) {
+    process::RunOptions options;
+    options.environment = std::vector<std::pair<std::string, std::string>>{{"PROTOIO_ONLY", "one two"}};
+#ifdef _WIN32
+    EXPECT_EQ(process::run({PROTOIO_TESTCHILD, "env", "PROTOIO_ONLY"}, options).out, "one two");
+    EXPECT_EQ(process::run({"cmd", "/c", "exit 3"}, options).exitCode, 3);
+    EXPECT_EQ(process::run({PROTOIO_TESTCHILD, "env", "PATH"}, options).out, "");
+    // SystemRoot is the one variable added: some system DLLs need it.
+    EXPECT_NE(process::run({PROTOIO_TESTCHILD, "env", "SystemRoot"}, options).out, "");
+    EXPECT_EQ(process::run({PROTOIO_TESTCHILD, "wenv", "PROTOIO_ONLY"}, options).out, "one two");
+#else
+    auto r = process::run({"env"}, options);
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(r.out, "PROTOIO_ONLY=one two\n");
+#endif
+    // An empty environment is an environment too.
+    options.environment = std::vector<std::pair<std::string, std::string>>{};
+#ifdef _WIN32
+    EXPECT_EQ(process::run({PROTOIO_TESTCHILD, "env", "PROTOIO_ONLY"}, options).out, "");
+#else
+    EXPECT_EQ(process::run({"env"}, options).out, "");
+#endif
+    options.environment = std::vector<std::pair<std::string, std::string>>{{"A=B", "c"}};
+    try {
+        process::run(kTrue, options);
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::InvalidArgument) << e.what();
+    }
+}
+
+TEST(Process, RunOptionsFeedInputWithADirectoryAndAnEnvironment) {
+    protoio_test::TempDir d;
+    process::RunOptions options;
+    options.input = std::string("fed\n");
+    options.directory = d.path;
+    options.environment = std::vector<std::pair<std::string, std::string>>{{"X", "1"}};
+    auto r = process::run(kCat, options);
+    EXPECT_EQ(r.exitCode, 0) << r.err;
+    EXPECT_EQ(r.out, "fed\n");
 }
 
 TEST(Process, ConcurrentRuns) {

@@ -44,6 +44,32 @@ RunResult run(const std::vector<std::string>& argv,
 // it interpolates. An empty command throws InvalidArgument.
 RunResult shell(const std::string& command, const std::optional<std::string>& input = std::nullopt);
 
+// How run starts a child, beyond its arguments.
+struct RunOptions {
+    // Fed to the child's standard input, which is closed at once when there
+    // is none.
+    std::optional<std::string> input;
+    // The child's working directory; the caller's when there is none. A
+    // directory that does not exist throws Process (ENOENT). A program named
+    // with a relative directory ("./tool", "bin\\tool") is found from this
+    // directory, as the child's exec would find it.
+    std::optional<std::string> directory;
+    // The child's whole environment, replacing the caller's; the caller's is
+    // inherited when there is none. A bare program name is still searched in
+    // the CALLER's PATH (as the JVM's ProcessBuilder does), so a child can be
+    // given an environment without PATH. A name that is empty or contains '='
+    // throws InvalidArgument. On Windows, where some system DLLs fail without
+    // it, SystemRoot is added from the caller's environment when it is not
+    // given.
+    std::optional<std::vector<std::pair<std::string, std::string>>> environment;
+};
+
+// run with a working directory and an environment for the child, which
+// spawn-and-exec APIs set without a shell: posix_spawn's file actions
+// (posix_spawn_file_actions_addchdir_np: glibc 2.29, macOS 10.15) and
+// environment on POSIX, CreateProcessW's on Windows.
+RunResult run(const std::vector<std::string>& argv, const RunOptions& options);
+
 // Starts a child that shares the caller's standard streams; answers its pid.
 int spawn(const std::vector<std::string>& argv);
 

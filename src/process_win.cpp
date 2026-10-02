@@ -164,8 +164,10 @@ std::wstring searchPath() {
 }
 
 // The program CreateProcessW runs for argv[0], as a full path. Throws
-// Process (ENOENT) when there is none, InvalidArgument for a batch file.
-std::wstring programPath(const std::string& argv0) {
+// Process (ENOENT) when there is none, InvalidArgument for a batch file. A
+// name with a relative directory is taken from `base` when there is one (the
+// child's working directory), as exec takes it on POSIX.
+std::wstring programPath(const std::string& argv0, const std::wstring& base = std::wstring()) {
     const std::wstring name = win::widen(argv0);
     const std::size_t sep = name.find_last_of(L"\\/:");
     std::wstring found;
@@ -173,6 +175,8 @@ std::wstring programPath(const std::string& argv0) {
         // A directory (or a drive) is named: no search, as CreateProcess.
         std::wstring candidate = name;
         if (name.find(L'.', sep + 1) == std::wstring::npos) candidate += L".exe";
+        const bool relative = !(name[0] == L'\\' || name[0] == L'/' || (name.size() >= 2 && name[1] == L':'));
+        if (relative && !base.empty()) candidate = base + L"\\" + candidate;
         found = fullPath(candidate);
         const DWORD attrs = found.empty() ? INVALID_FILE_ATTRIBUTES : ::GetFileAttributesW(found.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY)) found.clear();
@@ -198,6 +202,8 @@ std::wstring programPath(const std::string& argv0) {
 // Starts `program` (a full path) with the command line `cmd`; its standard
 // handles are `in`, `out` and `err` (a null one stays null in the child) and
 // it inherits nothing else. `name` names the program in error messages.
+// `directory` (empty: the caller's) is the child's working directory and
+// `environment` (null: the caller's) its Unicode environment block.
 //
 // The handles are not inheritable; inheritable duplicates are made here and
 // closed as soon as CreateProcessW returns, and only those, listed in
@@ -206,7 +212,8 @@ std::wstring programPath(const std::string& argv0) {
 // list (system(), _popen, a library) can inherit the duplicates too: that is
 // the residual window, the length of one CreateProcessW call.
 PROCESS_INFORMATION start(const std::wstring& program, std::wstring cmd, const std::string& name, HANDLE in,
-                          HANDLE out, HANDLE err) {
+                          HANDLE out, HANDLE err, const std::wstring& directory = std::wstring(),
+                          const std::vector<wchar_t>* environment = nullptr) {
     HANDLE std3[3] = {in, out, err};
     Handle dups[3];
     HANDLE list[3];
@@ -251,8 +258,10 @@ PROCESS_INFORMATION start(const std::wstring& program, std::wstring cmd, const s
     si.StartupInfo.hStdError = std3[2];
     si.lpAttributeList = attrs;
     PROCESS_INFORMATION pi{};
-    const BOOL ok = ::CreateProcessW(program.c_str(), cmd.data(), nullptr, nullptr, n > 0,
-                                     EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi);
+    const DWORD flags = EXTENDED_STARTUPINFO_PRESENT | (environment ? CREATE_UNICODE_ENVIRONMENT : 0);
+    void* envBlock = environment ? const_cast<wchar_t*>(environment->data()) : nullptr;
+    const BOOL ok = ::CreateProcessW(program.c_str(), cmd.data(), nullptr, nullptr, n > 0, flags, envBlock,
+                                     directory.empty() ? nullptr : directory.c_str(), &si.StartupInfo, &pi);
     const DWORD e = ::GetLastError();
     ::DeleteProcThreadAttributeList(attrs);
     for (Handle& d : dups) d.reset();
@@ -263,10 +272,59 @@ PROCESS_INFORMATION start(const std::wstring& program, std::wstring cmd, const s
 
 // start for an argv: the command line quoted for the C runtime, argv[0]
 // resolved by programPath (which refuses batch files).
-PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who, HANDLE in, HANDLE out, HANDLE err) {
+PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who, HANDLE in, HANDLE out, HANDLE err,
+                          const std::wstring& directory = std::wstring(),
+                          const std::vector<wchar_t>* environment = nullptr) {
     std::wstring cmd = commandLine(argv, who);
-    const std::wstring program = programPath(argv[0]);
-    return start(program, std::move(cmd), argv[0], in, out, err);
+    const std::wstring program = programPath(argv[0], directory);
+    return start(program, std::move(cmd), argv[0], in, out, err, directory, environment);
+}
+
+// The working directory a child gets for RunOptions::directory: the full
+// path, which must name a directory (Process, ENOENT otherwise, as chdir
+// answers on POSIX).
+std::wstring childDirectory(const std::string& argv0, const std::string& dir) {
+    const std::wstring full = fullPath(win::widen(dir));
+    const DWORD attrs = full.empty() ? INVALID_FILE_ATTRIBUTES : ::GetFileAttributesW(full.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES)
+        processError("cannot run " + argv0 + " in " + dir, ENOENT);
+    if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) processError("cannot run " + argv0 + " in " + dir, ENOTDIR);
+    return full;
+}
+
+// The Unicode environment block for RunOptions::environment: "NAME=value"
+// entries sorted by name without regard to case (as CreateProcess
+// documents), each NUL-terminated, and a final NUL. SystemRoot is added from
+// the caller's environment when it is not given: some system DLLs (Winsock's
+// among them) fail to load without it, which is also why the JVM adds it.
+std::vector<wchar_t> environmentBlock(const std::vector<std::pair<std::string, std::string>>& vars) {
+    std::vector<std::pair<std::wstring, std::wstring>> entries;
+    bool systemRoot = false;
+    for (const auto& [name, value] : vars) {
+        if (name.empty() || name.find('=') != std::string::npos)
+            throw Error(Error::Kind::InvalidArgument, "run: invalid environment variable name: " + name, EINVAL);
+        std::wstring wname = win::widen(name);
+        if (::_wcsicmp(wname.c_str(), L"SystemRoot") == 0) systemRoot = true;
+        entries.emplace_back(std::move(wname), win::widen(value));
+    }
+    if (!systemRoot) {
+        const std::wstring root =
+            sized([](wchar_t* b, DWORD n) { return ::GetEnvironmentVariableW(L"SystemRoot", b, n); });
+        if (!root.empty()) entries.emplace_back(L"SystemRoot", root);
+    }
+    std::stable_sort(entries.begin(), entries.end(),
+                     [](const auto& a, const auto& b) { return ::_wcsicmp(a.first.c_str(), b.first.c_str()) < 0; });
+    std::vector<wchar_t> block;
+    for (const auto& [name, value] : entries) {
+        block.insert(block.end(), name.begin(), name.end());
+        block.push_back(L'=');
+        block.insert(block.end(), value.begin(), value.end());
+        block.push_back(L'\0');
+    }
+    // An empty block is two NULs.
+    if (block.empty()) block.push_back(L'\0');
+    block.push_back(L'\0');
+    return block;
 }
 
 // A pipe whose ends are both non-inheritable: `child` is the end the child
@@ -396,8 +454,19 @@ RunResult runWith(StartChild startChild, const std::optional<std::string>& input
 } // namespace
 
 RunResult run(const std::vector<std::string>& argv, const std::optional<std::string>& input) {
+    RunOptions options;
+    options.input = input;
+    return run(argv, options);
+}
+
+RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
     if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "run: needs a command");
-    return runWith([&](HANDLE in, HANDLE out, HANDLE err) { return start(argv, "run", in, out, err); }, input);
+    const std::wstring directory = options.directory ? childDirectory(argv[0], *options.directory) : std::wstring();
+    std::vector<wchar_t> environment;
+    if (options.environment) environment = environmentBlock(*options.environment);
+    const std::vector<wchar_t>* env = options.environment ? &environment : nullptr;
+    return runWith([&](HANDLE in, HANDLE out, HANDLE err) { return start(argv, "run", in, out, err, directory, env); },
+                   options.input);
 }
 
 RunResult shell(const std::string& command, const std::optional<std::string>& input) {

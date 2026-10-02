@@ -5,6 +5,7 @@
 //   testchild true              exits 0 without reading its input
 //   testchild print OUT ERR N   writes OUT and ERR to its outputs, exits N
 //   testchild env NAME          writes the value of NAME (nothing if unset)
+//   testchild cwd               writes its working directory, as UTF-8
 //   testchild sleep MS          sleeps MS milliseconds
 //   testchild args A...         writes each argument as "[A]\n"
 //   testchild wargs A...        the same, read with GetCommandLineW and
@@ -75,6 +76,13 @@ int main(int argc, char** argv) {
         wchar_t** w = ::CommandLineToArgvW(::GetCommandLineW(), &n);
         for (int i = 2; i < n; ++i) std::printf("[%s]\n", utf8(w[i]).c_str());
         ::LocalFree(w);
+        return 0;
+    }
+    if (mode == "cwd") {
+        const DWORD n = ::GetCurrentDirectoryW(0, nullptr);
+        std::wstring dir(n, L'\0');
+        dir.resize(::GetCurrentDirectoryW(n, dir.data()));
+        std::fputs(utf8(dir.c_str()).c_str(), stdout);
         return 0;
     }
     if (mode == "wenv" && argc == 3) {
