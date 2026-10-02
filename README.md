@@ -220,11 +220,16 @@ The API is the same; what differs:
   and closed when the thread ends), and `close` sends it a byte: the waiter
   returns at once, with no polling interval. Should that socket be
   impossible to create, the thread falls back to waiting in 50 ms slices.
-  Anonymous pipes and the console cannot be polled: a read from them blocks
-  in `ReadFile` (`ReadConsoleW`), and a read timeout cancels it at the
-  deadline (`CancelSynchronousIo`, from a thread-pool timer), so an idle
-  descriptor costs nothing while it waits and the timeout applies to console
-  input too. A write to a pipe ignores the timeout. `close` does not wake a
+  Anonymous pipes cannot be polled: a read from one blocks in `ReadFile`,
+  and a read timeout cancels it at the deadline (`CancelSynchronousIo`, from
+  a thread-pool timer), so an idle pipe costs nothing while it waits. Read
+  timeouts apply to console input too, but a console read cannot be
+  cancelled cleanly (the cancelled read lives on in the console and swallows
+  the next line), so a timed console read first waits for a complete line
+  (any character, outside line mode): blocked on the console handle while
+  nothing is typed, re-checking every 10 ms while a line is partly typed.
+  Typed characters are echoed once the read starts, that is when the line
+  is complete. A write to a pipe ignores the timeout. `close` does not wake a
   thread blocked reading a pipe (nor does it on POSIX; the contract is for
   sockets).
 - **Errors.** Winsock and Win32 codes are mapped to the errno values of the

@@ -63,9 +63,11 @@ consumers ask for `find_package(protoIO 0.2 CONFIG)`.
   Windows ROOT and CA certificate stores.
 - Windows: socket waits polled in 50 ms slices and pipe reads with a timeout
   every 5 ms. A socket wait now also waits on the thread's wake-up socket,
-  which `close` signals; a pipe or console read blocks in the read and a
-  thread-pool timer cancels it at the deadline.
-- Windows: read timeouts were ignored on console input.
+  which `close` signals; a pipe read blocks in the read and a thread-pool
+  timer cancels it at the deadline.
+- Windows: read timeouts were ignored on console input. A timed console read
+  now waits for a complete line on the console handle first (a cancelled
+  console read would swallow the next line).
 - Windows: `udpSend` ignored the descriptor's timeout and could retry
   forever on a full send buffer.
 - Windows: if `run` could not start its standard-error reader thread while

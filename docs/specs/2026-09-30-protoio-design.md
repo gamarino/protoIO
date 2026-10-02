@@ -222,4 +222,4 @@ green, docs, CHANGELOG, and the tutorial updated.
 
 - The repository is `gamarino/protoIO`, public like the runtimes'. It is pushed at the end of the whole work.
 - HTTP clients follow the proposal: requests-scala for protoScala; babashka http-client and Ring for protoClojure.
-- POSIX only; Windows through WSL2.
+- POSIX only; Windows through WSL2. (Superseded by 0.2.0, 2026-10-02: native Windows (MSVC) and macOS support; see README.md, "Windows".)
