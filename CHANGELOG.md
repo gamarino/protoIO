@@ -5,6 +5,29 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.2.2 - 2026-10-02
+
+### Added
+
+- `process::run(argv, RunOptions)`: a working directory and a replacement
+  environment for the child, set by the spawn call itself
+  (`posix_spawn_file_actions_addchdir_np` and the `envp` of `posix_spawnp`;
+  `CreateProcessW`'s directory and environment block), so a runtime no longer
+  needs `sh -c 'cd ...'` or `env -i` (which Windows lacks) for them. A bare
+  program name is searched in the caller's `PATH`, as the JVM does; a
+  relative name with a directory is taken from the child's directory; on
+  Windows `SystemRoot` is added when the environment lacks it.
+
+### Fixed
+
+- `tcpListen("", port)` listens on every interface, IPv6 included, as
+  documented: one dual-stack socket (`IPV6_V6ONLY` off) where the host has
+  IPv6, else 0.0.0.0. It bound 0.0.0.0 only, so a client that tried `::1`
+  first ("localhost" on Windows and macOS) was refused there before it
+  reached 127.0.0.1, which cost each connection about 0.3 s on Windows.
+  `sockName` and `peerName` answer an IPv4 peer of a dual-stack socket as
+  its IPv4 address (127.0.0.1, not ::ffff:127.0.0.1).
+
 ## 0.2.1 - 2026-10-02
 
 ### Added

@@ -49,8 +49,8 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
 | `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir` |
-| `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
-| `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)`, `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
+| `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `run(argv, RunOptions{input, directory, environment})` also sets the child's working directory and replaces its environment, without a shell; `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
+| `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)` (an empty host: one dual-stack socket, IPv4 and IPv6), `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
 | `protoio/http.h` | The HTTP/1.1 message layer and client, below |
 
 ### HTTP (`protoio::http`)
@@ -151,7 +151,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --output-on-failure
 
-# Debian package: protoio-dev_0.2.1_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.2.2_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -271,7 +271,16 @@ The API is the same; what differs:
     the system directory, the Windows directory and `PATH`, and **not** in
     the working directory (where `CreateProcess` would look before the system
     directories), so a planted `git.exe` or `cmd.exe` there never runs.
-    `.exe` is appended when the name has no extension.
+    `.exe` is appended when the name has no extension. With
+    `RunOptions::directory`, a relative name with a directory (`bin\tool`)
+    is taken from that directory, as on POSIX.
+  - *Directory and environment.* `RunOptions::directory` and
+    `RunOptions::environment` become `CreateProcessW`'s working directory and
+    Unicode environment block (sorted by name, as `CreateProcess` documents).
+    A bare program name is still searched in the caller's `PATH`. When the
+    given environment has no `SystemRoot`, the caller's is added: some system
+    DLLs (Winsock's among them) fail to load without it, which is also why
+    the JVM adds it.
   - *Batch files are refused.* A target that is a `.bat` or `.cmd` file
     throws `InvalidArgument`: `CreateProcess` runs it through `cmd.exe`,
     which parses the command line again by its own rules, so an argument such
