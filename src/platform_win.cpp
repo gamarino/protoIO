@@ -270,7 +270,17 @@ ssize_t readDescriptor(int fd, char* out, std::size_t n, int timeoutMs) {
             return -1;
         }
         if (!console) return static_cast<ssize_t>(got);
-        if (got == 0) return 0;
+        if (got == 0) {
+            // A cancelled console read succeeds with nothing read, where a
+            // pipe read fails with ERROR_OPERATION_ABORTED. Nothing read
+            // otherwise (Ctrl+C): read again. A console's end of input is
+            // Ctrl+Z, below.
+            if (expired) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            continue;
+        }
         if (units[0] == 0x1A) return 0;  // Ctrl+Z at the start of a line: the end, as the C runtime reads it
         const std::string bytes = narrow(units.substr(0, got));
         std::memcpy(out, bytes.data(), bytes.size());

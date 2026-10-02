@@ -27,7 +27,8 @@ struct Address {
 int tcpConnect(const std::string& host, int port, int timeoutMs = -1);
 
 // Listens on host:port (an empty host: every interface; port 0: a free port,
-// see sockName). SO_REUSEADDR is set.
+// see sockName). SO_REUSEADDR is set; on Windows, where it would let another
+// socket take the port over, SO_EXCLUSIVEADDRUSE is set instead.
 int tcpListen(const std::string& host, int port, int backlog = 128);
 
 // A connected socket, or std::nullopt when `timeoutMs` elapsed first or the
@@ -40,7 +41,8 @@ Address peerName(int fd);
 
 // Upgrades a connected socket to TLS 1.2 or later, as a client. With
 // `verify`, the certificate chain is checked against the system's trust store
-// and the certificate must name `host`. The socket becomes non-blocking: the
+// (on Windows, the ROOT and CA certificate stores) plus any certificates
+// given to trustCertificates, and the certificate must name `host`. The socket becomes non-blocking: the
 // handshake and every later read and write wait in poll(2), bounded by the
 // descriptor's timeout (protoio::setTimeout), and a handshake that expires
 // throws ConnectionTimedOut.
@@ -58,7 +60,9 @@ void trustCertificates(const std::string& pem);
 int udpBind(const std::string& host, int port);
 
 // Sends one datagram. `host` is resolved in the socket's own address family:
-// an IPv6 destination from an IPv4 socket throws NameLookup.
+// an IPv6 destination from an IPv4 socket throws NameLookup. A send that has
+// to wait for buffer space is bounded by the descriptor's timeout
+// (protoio::setTimeout) and throws ConnectionTimedOut when it expires.
 void udpSend(int fd, const std::string& host, int port, std::string_view data);
 
 struct Datagram {

@@ -13,13 +13,18 @@ namespace protoio::process {
 
 struct RunResult {
     // The exit status, or 128 + the signal number when a signal ended the
-    // child (the shell's convention).
+    // child (the shell's convention). On Windows a child that ended with an
+    // exception (an NTSTATUS code such as 0xC0000005) gets 128 + the POSIX
+    // signal for the same fault, e.g. 139 for an access violation; see
+    // README.md, "Windows".
     int exitCode = 0;
     std::string out;  // everything the child wrote to its standard output
     std::string err;  // everything the child wrote to its standard error
 };
 
-// Runs argv[0] (searched in PATH) with the arguments that follow, feeds it
+// Runs argv[0] (searched in PATH; on Windows also in the application's and
+// the system directories, never in the working directory, and a .bat or
+// .cmd target throws InvalidArgument) with the arguments that follow, feeds it
 // `input` on its standard input (closed at once when there is none), and
 // collects both outputs until it exits. A child that exits without reading
 // all its input does not raise SIGPIPE in the caller. Blocks until the child

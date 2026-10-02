@@ -50,7 +50,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
 | `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir` |
 | `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
-| `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)`, `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
+| `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)`, `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
 | `protoio/http.h` | The HTTP/1.1 message layer and client, below |
 
 ### HTTP (`protoio::http`)
@@ -99,7 +99,10 @@ status (or 413 for BodyTooLarge and 400 for Network from `readBody`).
     of each other: each line goes to exactly one reader, and a thread waiting
     for input never blocks a writer;
   - `close` shuts a socket down, which wakes a thread blocked reading it,
-    accepting on it or receiving from it;
+    accepting on it or receiving from it at once (on macOS and Windows,
+    where shutting a socket down does not wake every waiter, each waiting
+    thread also waits on a wake-up channel of its own, which `close`
+    signals);
   - a descriptor number is released only after its last user returns, so a
     concurrent `open` never reuses it under a waiting thread.
 - **SIGPIPE:** writes never raise it (they fail with an Error carrying EPIPE),
@@ -148,12 +151,20 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --output-on-failure
 
-# Debian package: protoio-dev_0.1.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.2.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
 Options: `PROTOIO_BUILD_TESTS` and `PROTOIO_INSTALL` (both ON only for a
-top-level build), `PROTOIO_TSAN`.
+top-level build), `PROTOIO_TSAN`, `PROTOIO_WARNINGS_AS_ERRORS` (OFF; CI
+turns it on: the library builds without warnings at `/W4` with MSVC and
+`-Wall -Wextra -Wpedantic` with GCC and Clang).
+
+A test that cannot run on a host is skipped with the reason
+(`GTEST_SKIP`), and ctest lists it as skipped, not passed: the IPv6 loopback
+tests where `::1` is unusable, the https test against a public host
+(`www.github.com`) without network access, and the Windows console test
+when no console can be created.
 
 ## Windows
 
@@ -188,33 +199,105 @@ The API is the same; what differs:
   with the stream functions.
 - **Text.** Paths, arguments and environment strings are UTF-8, converted to
   and from the UTF-16 the system uses. `absolute`, `cwd` and `tempDir` answer
-  native separators (`C:\dir\file`); `absolute("/")` is the drive root. The
-  standard streams stay as the C runtime opened them (text mode: a `"\n"`
-  written to descriptor 1 or 2 becomes CR LF); a runtime that wants raw bytes
-  there calls `_setmode(fd, _O_BINARY)`.
+  native separators (`C:\dir\file`); `absolute("/")` is the drive root.
+- **Reading is binary.** The library reads every descriptor as bytes with
+  `ReadFile`, whatever the C runtime's mode for it. Standard input starts in
+  text mode, where the C runtime would turn CR LF into LF and stop at a
+  Ctrl+Z (0x1A) byte; through the library a 0x1A is data and CR LF arrives as
+  it is (`readLine` strips the CR; `readAll` and `readBytes` keep it). A
+  console is read with `ReadConsoleW` and answered as UTF-8, whatever its
+  code page; there a line that starts with Ctrl+Z is the end of the input,
+  as Ctrl+D is on a POSIX terminal, and lines end in CR LF.
+- **Writing.** Files and pipes are written as bytes. Descriptors 1 and 2 go
+  through the C stdio streams and stay as the C runtime opened them (text
+  mode: a `"\n"` becomes CR LF); a runtime that wants raw bytes there calls
+  `_setmode(fd, _O_BINARY)`.
 - **SIGPIPE** does not exist: `SigpipeGuard` does nothing, and a write to a
   pipe whose reader is gone fails with EPIPE by itself.
-- **Waits.** Closing a socket does not wake a thread waiting on it, so waits
-  run in 50 ms slices and notice `close` within one. Anonymous pipes cannot
-  be polled: a read timeout on a pipe is enforced by checking for input every
-  5 ms, and a write to a pipe ignores the timeout.
+- **Waits.** Closing a socket does not wake a thread waiting on it in
+  `WSAPoll`, so each waiting thread also waits on a wake-up socket of its
+  own (a UDP socket bound to 127.0.0.1, created on the thread's first wait
+  and closed when the thread ends), and `close` sends it a byte: the waiter
+  returns at once, with no polling interval. Should that socket be
+  impossible to create, the thread falls back to waiting in 50 ms slices.
+  Anonymous pipes and the console cannot be polled: a read from them blocks
+  in `ReadFile` (`ReadConsoleW`), and a read timeout cancels it at the
+  deadline (`CancelSynchronousIo`, from a thread-pool timer), so an idle
+  descriptor costs nothing while it waits and the timeout applies to console
+  input too. A write to a pipe ignores the timeout. `close` does not wake a
+  thread blocked reading a pipe (nor does it on POSIX; the contract is for
+  sockets).
 - **Errors.** Winsock and Win32 codes are mapped to the errno values of the
   POSIX build (`WSAECONNREFUSED` is `ECONNREFUSED`, a broken pipe is `EPIPE`,
   ...). A write to a TCP connection the peer closed reports `ECONNRESET` or
   `ECONNABORTED` where Linux reports `EPIPE`.
 - **TCP.** `tcpListen` does not set `SO_REUSEADDR` (on Windows it would let
-  another socket take the port). A connect to a loopback address that is
-  refused fails at once, as on POSIX; Windows would otherwise send the SYN
-  again for about two seconds, so on loopback those retries are switched off.
-- **Processes.** `run` and `spawn` use `CreateProcessW`. `argv[0]` is
-  searched as `CreateProcess` searches (`.exe` is implied; a batch file needs
-  `cmd /c`), and the arguments are quoted so that the child's C runtime gets
-  `argv` back unchanged. A child inherits only its three standard handles.
-  `kill` supports 0, `SIGTERM` (15) and `SIGKILL` (9); the last two end the
-  child with exit code 128 + signal, what `wait` and `run` answer on POSIX for
-  a child that signal ended. Any other signal throws `Process` with `ENOSYS`.
-  `wait` works for children started by `spawn` (others throw `Process`,
-  `ECHILD`). `platform()` is `"windows"`.
+  another socket take the port) and sets `SO_EXCLUSIVEADDRUSE`, so no other
+  socket can bind the port while it listens; the port can be listened on
+  again at once after the listener closes, even while its connections linger
+  in TIME_WAIT. Windows refuses a connect (with a reset) both when nobody
+  listens and while the listener's backlog is full, and then sends the SYN
+  again for about two seconds. On a loopback address those kernel retries
+  are switched off and `tcpConnect` retries a refused connect itself, after
+  10, 20, 40, 80 and 160 ms (within the timeout): a port nobody listens on
+  is refused after about 0.3 s instead of 2 s (POSIX: at once), and a
+  listener that drains a full backlog within that time gets the connection.
+- **TLS.** Verification uses the Windows certificate stores: when the
+  verifying context is created, every certificate of the current user's and
+  the machine's `ROOT` and `CA` stores is added to OpenSSL's trust store
+  (as are `SSL_CERT_FILE` and `SSL_CERT_DIR`, when set).
+  `net::trustCertificates(pem)` adds more. This works with any OpenSSL 3;
+  OpenSSL 3.2's `org.openssl.winstore:` store was not used because it ties
+  verification to how the linked OpenSSL was built. One limit holds for
+  both: Windows downloads some trusted roots from Windows Update only the
+  first time its own (CryptoAPI) code needs them, so a root no program on
+  the machine has used yet may be missing, and a site that chains to it
+  fails with "unable to get local issuer certificate".
+- **Files.** Files are opened with `CreateFileW`, sharing read, write and
+  delete access, so a file a stream has open can still be deleted, renamed
+  or replaced, as on POSIX. `move` renames with POSIX semantics
+  (`FileRenameInfoEx`: an existing target is replaced even while open; on a
+  file system without it, `MoveFileExW` replaces a target nobody has open).
+- **Processes.** `run` and `spawn` use `CreateProcessW`, and the arguments
+  are quoted so that the child's C runtime (`CommandLineToArgvW`) gets
+  `argv` back unchanged.
+  - *Program search.* A name with a directory (`.\tool.exe`, `C:\bin\x`) is
+    used as it is. A bare name is searched in the application's directory,
+    the system directory, the Windows directory and `PATH`, and **not** in
+    the working directory (where `CreateProcess` would look before the system
+    directories), so a planted `git.exe` or `cmd.exe` there never runs.
+    `.exe` is appended when the name has no extension.
+  - *Batch files are refused.* A target that is a `.bat` or `.cmd` file
+    throws `InvalidArgument`: `CreateProcess` runs it through `cmd.exe`,
+    which parses the command line again by its own rules, so an argument such
+    as `a&calc` would run a second command whatever the quoting (BatBadBut,
+    CVE-2024-24576). Running `cmd.exe /c ...` explicitly is the caller's
+    choice of a shell, exactly like `sh -c` on POSIX: everything after `/c`
+    is cmd syntax, and protoIO does not (cannot reliably) escape it. Never
+    put untrusted text there.
+  - *Handles.* A child inherits only its three standard handles. They are
+    created non-inheritable; inheritable duplicates exist only for the length
+    of the `CreateProcessW` call and reach the child through
+    `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. The residual window: a process that
+    another thread starts during that call with handle inheritance on and no
+    handle list (`system()`, `_popen`) can inherit those duplicates too, and
+    then holds the pipe open until it exits.
+  - *Exit codes.* A child that ends with an exception gets 128 + the POSIX
+    signal (Linux numbers) for the same fault, as the shell answers for a
+    child that signal ended: an access violation or a stack overflow is 139
+    (SIGSEGV), Ctrl+C (`STATUS_CONTROL_C_EXIT`) 130 (SIGINT), a division by
+    zero or another arithmetic fault 136 (SIGFPE), an illegal instruction 132
+    (SIGILL), a breakpoint 133 (SIGTRAP), an in-page error or a misaligned
+    access 135 (SIGBUS), and any other NTSTATUS error code (0xC0000000 and up:
+    fail-fast, which `abort()` and buffer-overrun checks raise, heap
+    corruption, ...) 134 (SIGABRT). Every other exit code is answered as it is
+    (a code above 255 too, unlike POSIX).
+  - *Signals.* `kill` supports 0, `SIGTERM` (15) and `SIGKILL` (9); the last
+    two end the child with `TerminateProcess` and exit code 128 + signal, what
+    `wait` and `run` answer on POSIX for a child that signal ended. Any other
+    signal throws `Process` with `ENOSYS`. `wait` works for children started
+    by `spawn` (others throw `Process`, `ECHILD`). `platform()` is
+    `"windows"`.
 
 ## Consuming protoIO from CMake
 
@@ -223,7 +306,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.1 CONFIG QUIET)
+find_package(protoIO 0.2 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.

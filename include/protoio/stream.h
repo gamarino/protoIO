@@ -85,8 +85,10 @@ void flush(int fd);
 void close(int fd);
 
 // Bounds every later wait on this descriptor (read, write, TLS handshake) to
-// `ms` milliseconds; a wait that expires throws ConnectionTimedOut. -1 waits
-// without limit (the default).
+// `ms` milliseconds; a wait that expires throws ConnectionTimedOut on a
+// socket, FileSystem with ETIMEDOUT on a pipe or terminal (the console on
+// Windows). -1 waits without limit (the default). On Windows a write to a
+// pipe ignores it.
 void setTimeout(int fd, int ms);
 
 // Drops any state the library holds for a descriptor number that the caller
