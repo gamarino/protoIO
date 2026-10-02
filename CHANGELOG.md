@@ -5,6 +5,19 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.2.1 - 2026-10-02
+
+### Added
+
+- `process::shell(command, input)`: runs a command line through the system
+  shell, feeding input and collecting outputs as `run` does. On POSIX it is
+  `run({"/bin/sh", "-c", command}, input)`. On Windows it runs the system
+  directory's `cmd.exe` with the prebuilt command line
+  `cmd.exe /d /s /c "<command>"`, so the command reaches cmd verbatim; `run`
+  with `cmd.exe /c` applies the C runtime's argument quoting, which cmd does
+  not undo (`echo "a b"` arrived as `"echo \"a b\""`). An empty command
+  throws `InvalidArgument`.
+
 ## 0.2.0 - 2026-10-02
 
 Native Windows and macOS support, and the fixes of the Windows-port review.

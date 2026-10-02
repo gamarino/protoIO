@@ -118,6 +118,11 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
     return res;
 }
 
+RunResult shell(const std::string& command, const std::optional<std::string>& input) {
+    if (command.empty()) throw Error(Error::Kind::InvalidArgument, "shell: needs a command");
+    return run({"/bin/sh", "-c", command}, input);
+}
+
 int spawn(const std::vector<std::string>& argv) {
     std::vector<char*> args = argvOf(argv, "spawn");
     pid_t pid;

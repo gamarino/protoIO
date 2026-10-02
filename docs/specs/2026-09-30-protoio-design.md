@@ -66,7 +66,7 @@ The code is moved out of protoST, not rewritten; the review fixes come with it.
 |---|---|
 | `protoio/stream.h` | Descriptor registry and `FdState`. `readLine(fd, max)`, `readAll`, `readBytes(n)`, `readChars(n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout`. A per-thread SIGPIPE guard: only the process's own stdout keeps the default action. |
 | `protoio/file.h` | `open`, whole-file `read`/`write`/`append`, `stat`, `remove` (recursive), `move`, `copy`, `mkdir`, `list`, `absolute` (lexical), `tempDir`, `cwd`, `chdir`. |
-| `protoio/process.h` | `run(argv, input)` returning exit code, stdout and stderr, feeding input without SIGPIPE; `spawn(argv)`; `wait(pid)`; `kill(pid, sig)`; `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit`. |
+| `protoio/process.h` | `run(argv, input)` returning exit code, stdout and stderr, feeding input without SIGPIPE; `shell(command, input)` (added in 0.2.1: the same through the system shell); `spawn(argv)`; `wait(pid)`; `kill(pid, sig)`; `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit`. |
 | `protoio/net.h` | `tcpConnect(host, port, timeout)`, `tcpListen`, `tcpAccept(timeout)`, `sockName`/`peerName`, `tlsConnect(fd, host, verify)` (non-blocking, poll-bounded), `udpBind`, `udpSend` (resolves to the socket's address family), `udpReceive(timeout)`. |
 | `protoio/http.h` | The HTTP/1.1 message layer, described in §2.4. |
 

@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 
 #include <csignal>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -219,6 +220,79 @@ TEST(Process, AMissingCommandThrowsProcess) {
     EXPECT_THROW(process::run({}), Error);
     EXPECT_THROW(process::spawn({"protoio-no-such-command-xyz"}), Error);
 }
+
+// shell hands the command line to the system shell verbatim: /bin/sh -c on
+// POSIX, cmd.exe /d /s /c "<command>" on Windows.
+#ifdef _WIN32
+constexpr const char* kNl = "\r\n";
+#else
+constexpr const char* kNl = "\n";
+#endif
+
+TEST(Process, ShellRunsTheCommandThroughTheSystemShell) {
+    auto r = process::shell("echo hello");
+    EXPECT_EQ(r.exitCode, 0);
+    EXPECT_EQ(r.out, std::string("hello") + kNl);
+    EXPECT_EQ(process::shell("exit 3").exitCode, 3);
+}
+
+TEST(Process, ShellFeedsInput) {
+#ifdef _WIN32
+    auto r = process::shell("findstr x", std::string("x\r\n"));
+    EXPECT_EQ(r.out, "x\r\n");
+#else
+    auto r = process::shell("cat", std::string("hello\nworld\n"));
+    EXPECT_EQ(r.out, "hello\nworld\n");
+#endif
+    EXPECT_EQ(r.exitCode, 0);
+}
+
+TEST(Process, ShellPassesTheCommandVerbatim) {
+    auto r = process::shell("echo \"a b\"");
+    EXPECT_EQ(r.exitCode, 0);
+#ifdef _WIN32
+    // cmd's echo prints the quotes: they reached cmd as written, not escaped
+    // by the C runtime's rules.
+    EXPECT_EQ(r.out, "\"a b\"\r\n");
+    // The shell parses its own syntax: & separates two commands.
+    EXPECT_EQ(process::shell("echo a&echo b").out, "a\r\nb\r\n");
+#else
+    EXPECT_EQ(r.out, "a b\n");
+    EXPECT_EQ(process::shell("echo a; echo b").out, "a\nb\n");
+#endif
+}
+
+TEST(Process, ShellNeedsACommand) {
+    try {
+        process::shell("");
+        FAIL() << "expected an Error";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::InvalidArgument);
+    }
+}
+
+#ifdef _WIN32
+// The shell is cmd.exe from the system directory, never one planted in the
+// working directory (or named by PATH or COMSPEC).
+TEST(Process, ShellIgnoresAPlantedCmdOnWindows) {
+    protoio_test::TempDir d;
+    // The test child answers 100 to commands it does not know.
+    file::copy(PROTOIO_TESTCHILD, d / "cmd.exe");
+    const std::string before = file::cwd();
+    file::chdir(d.path);
+    struct Back {
+        std::string to;
+        ~Back() { file::chdir(to); }
+    } back{before};
+    const std::optional<std::string> comspec = process::getenv("COMSPEC");
+    process::setenv("COMSPEC", nativePath(d / "cmd.exe"));
+    struct RestoreComspec {
+        std::optional<std::string> value;
+        ~RestoreComspec() { process::setenv("COMSPEC", value); }
+    } restore{comspec};
+    EXPECT_EQ(process::shell("exit 3").exitCode, 3) << "the planted cmd.exe ran";
+}
+#endif
 
 TEST(Process, SpawnWaitKill) {
 #ifdef _WIN32

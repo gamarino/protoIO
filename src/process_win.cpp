@@ -16,6 +16,11 @@
 //   * Batch files (.bat, .cmd) are refused with InvalidArgument: CreateProcess
 //     runs them through cmd.exe, which parses the command line again by
 //     rules no argument quoting can make safe (BatBadBut, CVE-2024-24576).
+//   * shell runs the system directory's cmd.exe (never one found through
+//     PATH, COMSPEC or the working directory) with the prebuilt command line
+//     `cmd.exe /d /s /c "<command>"`, as CPython's subprocess does for
+//     shell=True: /s makes cmd strip exactly the outer quotes, so the command
+//     reaches it verbatim, and /d skips AutoRun. No argument quoting applies.
 //   * A child inherits exactly the handles it is given (a handle list), so
 //     concurrent runs never hold each other's pipes open. The handles are
 //     created non-inheritable; inheritable duplicates exist only for the
@@ -43,6 +48,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <process.h>
@@ -189,8 +195,9 @@ std::wstring programPath(const std::string& argv0) {
     return found;
 }
 
-// Starts a child whose standard handles are `in`, `out` and `err` (a null
-// one stays null in the child) and which inherits nothing else.
+// Starts `program` (a full path) with the command line `cmd`; its standard
+// handles are `in`, `out` and `err` (a null one stays null in the child) and
+// it inherits nothing else. `name` names the program in error messages.
 //
 // The handles are not inheritable; inheritable duplicates are made here and
 // closed as soon as CreateProcessW returns, and only those, listed in
@@ -198,9 +205,8 @@ std::wstring programPath(const std::string& argv0) {
 // another thread makes during that call with bInheritHandles and no handle
 // list (system(), _popen, a library) can inherit the duplicates too: that is
 // the residual window, the length of one CreateProcessW call.
-PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who, HANDLE in, HANDLE out, HANDLE err) {
-    std::wstring cmd = commandLine(argv, who);
-    const std::wstring program = programPath(argv[0]);
+PROCESS_INFORMATION start(const std::wstring& program, std::wstring cmd, const std::string& name, HANDLE in,
+                          HANDLE out, HANDLE err) {
     HANDLE std3[3] = {in, out, err};
     Handle dups[3];
     HANDLE list[3];
@@ -221,7 +227,7 @@ PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who,
         HANDLE dup = nullptr;
         if (!::DuplicateHandle(::GetCurrentProcess(), std3[i], ::GetCurrentProcess(), &dup, 0, TRUE,
                                DUPLICATE_SAME_ACCESS))
-            lastError("cannot run " + argv[0]);
+            lastError("cannot run " + name);
         dups[i].h = dup;
         std3[i] = dup;
         list[n++] = dup;
@@ -230,12 +236,12 @@ PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who,
     ::InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
     std::vector<char> attrBuf(size);
     auto* attrs = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuf.data());
-    if (!::InitializeProcThreadAttributeList(attrs, 1, 0, &size)) lastError("cannot run " + argv[0]);
+    if (!::InitializeProcThreadAttributeList(attrs, 1, 0, &size)) lastError("cannot run " + name);
     if (n > 0 && !::UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, list, n * sizeof(HANDLE),
                                               nullptr, nullptr)) {
         const DWORD e = ::GetLastError();
         ::DeleteProcThreadAttributeList(attrs);
-        processError("cannot run " + argv[0], win::errnoOfWin32(e));
+        processError("cannot run " + name, win::errnoOfWin32(e));
     }
     STARTUPINFOEXW si{};
     si.StartupInfo.cb = sizeof si;
@@ -250,9 +256,17 @@ PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who,
     const DWORD e = ::GetLastError();
     ::DeleteProcThreadAttributeList(attrs);
     for (Handle& d : dups) d.reset();
-    if (!ok) processError("cannot run " + argv[0], win::errnoOfWin32(e));
+    if (!ok) processError("cannot run " + name, win::errnoOfWin32(e));
     ::CloseHandle(pi.hThread);
     return pi;
+}
+
+// start for an argv: the command line quoted for the C runtime, argv[0]
+// resolved by programPath (which refuses batch files).
+PROCESS_INFORMATION start(const std::vector<std::string>& argv, const char* who, HANDLE in, HANDLE out, HANDLE err) {
+    std::wstring cmd = commandLine(argv, who);
+    const std::wstring program = programPath(argv[0]);
+    return start(program, std::move(cmd), argv[0], in, out, err);
 }
 
 // A pipe whose ends are both non-inheritable: `child` is the end the child
@@ -321,15 +335,16 @@ void drain(HANDLE h, std::string& dst) {
 std::mutex g_childMutex;
 std::unordered_map<int, HANDLE> g_children;
 
-} // namespace
-
-RunResult run(const std::vector<std::string>& argv, const std::optional<std::string>& input) {
-    if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "run: needs a command");
+// The body of run and shell: makes the pipes, calls `startChild(in, out,
+// err)` to start the child on them, feeds it `input` and collects its outputs
+// until it exits.
+template <typename StartChild>
+RunResult runWith(StartChild startChild, const std::optional<std::string>& input) {
     Handle inW, inR, outR, outW, errR, errW;
     makePipe(inW, inR, true);
     makePipe(outR, outW, false);
     makePipe(errR, errW, false);
-    PROCESS_INFORMATION pi = start(argv, "run", inR.h, outW.h, errW.h);
+    PROCESS_INFORMATION pi = startChild(inR.h, outW.h, errW.h);
     Handle proc(pi.hProcess);
     inR.reset();
     outW.reset();
@@ -376,6 +391,23 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
     ::WaitForSingleObject(proc.h, INFINITE);
     res.exitCode = exitCodeOf(proc.h);
     return res;
+}
+
+} // namespace
+
+RunResult run(const std::vector<std::string>& argv, const std::optional<std::string>& input) {
+    if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "run: needs a command");
+    return runWith([&](HANDLE in, HANDLE out, HANDLE err) { return start(argv, "run", in, out, err); }, input);
+}
+
+RunResult shell(const std::string& command, const std::optional<std::string>& input) {
+    if (command.empty()) throw Error(Error::Kind::InvalidArgument, "shell: needs a command");
+    const std::wstring systemDir = sized([](wchar_t* b, DWORD n) { return ::GetSystemDirectoryW(b, n); });
+    if (systemDir.empty()) lastError("cannot run cmd.exe");
+    const std::wstring program = systemDir + L"\\cmd.exe";
+    const std::wstring cmd = L"cmd.exe /d /s /c \"" + win::widen(command) + L"\"";
+    return runWith([&](HANDLE in, HANDLE out, HANDLE err) { return start(program, cmd, "cmd.exe", in, out, err); },
+                   input);
 }
 
 int spawn(const std::vector<std::string>& argv) {

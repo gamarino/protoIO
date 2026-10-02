@@ -32,6 +32,18 @@ struct RunResult {
 RunResult run(const std::vector<std::string>& argv,
               const std::optional<std::string>& input = std::nullopt);
 
+// Runs `command` through the system shell, feeding it `input` and collecting
+// both outputs exactly as run does. On POSIX it is run({"/bin/sh", "-c",
+// command}, input). On Windows the shell is cmd.exe from the system directory
+// (never one found through PATH, COMSPEC or the working directory), started
+// with the command line `cmd.exe /d /s /c "<command>"`: /s makes cmd strip
+// just the outer quotes, so `command` reaches it verbatim, with no C runtime
+// quoting applied, and /d skips the AutoRun commands. The command IS a shell
+// command line: the caller is responsible for its syntax and for quoting or
+// escaping the shell's metacharacters (such as & | < > ^ % ; $) in any data
+// it interpolates. An empty command throws InvalidArgument.
+RunResult shell(const std::string& command, const std::optional<std::string>& input = std::nullopt);
+
 // Starts a child that shares the caller's standard streams; answers its pid.
 int spawn(const std::vector<std::string>& argv);
 

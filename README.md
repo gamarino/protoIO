@@ -49,7 +49,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
 | `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir` |
-| `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
+| `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
 | `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)`, `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
 | `protoio/http.h` | The HTTP/1.1 message layer and client, below |
 
@@ -151,7 +151,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --output-on-failure
 
-# Debian package: protoio-dev_0.2.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.2.1_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -280,6 +280,16 @@ The API is the same; what differs:
     choice of a shell, exactly like `sh -c` on POSIX: everything after `/c`
     is cmd syntax, and protoIO does not (cannot reliably) escape it. Never
     put untrusted text there.
+  - *Shell commands.* `run({"cmd.exe", "/c", command})` quotes `command` by
+    the C runtime's rules, which cmd.exe does not undo: `echo "a b"` reaches
+    it as `"echo \"a b\""`. `shell(command, input)` hands a command line to
+    cmd.exe verbatim instead: it runs `cmd.exe` from the system directory
+    (never one found through `PATH`, `COMSPEC` or the working directory) with
+    the command line `cmd.exe /d /s /c "<command>"`, as CPython's
+    `subprocess` does for `shell=True`. `/s` makes cmd strip exactly the
+    outer quotes, so `command` arrives as written; `/d` skips the AutoRun
+    commands. The command is cmd syntax: the caller quotes or escapes any
+    metacharacters (`& | < > ^ %`) in the data it puts there.
   - *Handles.* A child inherits only its three standard handles. They are
     created non-inheritable; inheritable duplicates exist only for the length
     of the `CreateProcessW` call and reach the child through

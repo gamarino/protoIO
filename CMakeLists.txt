@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(protoIO
-    VERSION 0.2.0
+    VERSION 0.2.1
     DESCRIPTION "Shared input and output (files, processes, TCP, UDP, TLS, HTTP) for the protoCore runtimes"
     HOMEPAGE_URL "https://github.com/gamarino/protoIO"
     LANGUAGES CXX)
