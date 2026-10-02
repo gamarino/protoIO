@@ -13,14 +13,21 @@
 #include <vector>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <io.h>
+#include "protoio/file.h"
 #else
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
 
 using protoio::Error;
+using protoio_test::TempDir;
 using namespace std::chrono_literals;
 
 namespace {
@@ -283,6 +290,108 @@ TEST(Stream, TimeoutBoundsAPipeRead) {
     protoio::write(p.w, "ok\n");
     EXPECT_EQ(protoio::readLine(p.r), "ok");
 }
+
+#ifdef _WIN32
+// The library reads every descriptor as bytes, whatever the C runtime's mode
+// for it: standard input starts in text mode, where the C runtime would turn
+// CR LF into LF and stop at a Ctrl+Z (0x1A) byte.
+TEST(Stream, TextModeDescriptorsReadAsBytesOnWindows) {
+    Pipe p;
+    ::_setmode(p.r, _O_TEXT);
+    const std::string data("a\r\nb\x1A" "c\n", 7);
+    protoio::write(p.w, data);
+    p.closeWriter();
+    EXPECT_EQ(protoio::readAll(p.r), data);
+}
+
+namespace {
+
+// Puts `text` in the console input buffer as typed keys.
+void typeKeys(HANDLE in, const std::wstring& text) {
+    std::vector<INPUT_RECORD> keys;
+    for (wchar_t c : text) {
+        for (BOOL down : {TRUE, FALSE}) {
+            INPUT_RECORD r{};
+            r.EventType = KEY_EVENT;
+            r.Event.KeyEvent.bKeyDown = down;
+            r.Event.KeyEvent.wRepeatCount = 1;
+            r.Event.KeyEvent.wVirtualKeyCode = c == L'\r' ? VK_RETURN : 0;
+            r.Event.KeyEvent.uChar.UnicodeChar = c;
+            keys.push_back(r);
+        }
+    }
+    DWORD written = 0;
+    ::WriteConsoleInputW(in, keys.data(), static_cast<DWORD>(keys.size()), &written);
+}
+
+} // namespace
+
+// Console input: a read timeout applies to it as to a pipe, the text arrives
+// as UTF-8 whatever the console's code page, and Ctrl+Z at the start of a
+// line is the end of the input. The test needs a console of its own, so it
+// runs its checks in a child copy of this program started with a new
+// (hidden) console, and reports what the child reported.
+TEST(Stream, ConsoleInputHonoursTimeoutsAndIsUtf8OnWindows) {
+    if (::GetEnvironmentVariableW(L"PROTOIO_CONSOLE_CHILD", nullptr, 0) > 0) {
+        const HANDLE in = ::CreateFileW(L"CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                        nullptr, OPEN_EXISTING, 0, nullptr);
+        if (in == INVALID_HANDLE_VALUE) GTEST_SKIP() << "no console input: error " << ::GetLastError();
+        const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(in), _O_RDONLY | _O_BINARY);
+        ASSERT_GE(fd, 0);
+        protoio::forget(fd);
+        protoio::setTimeout(fd, 300);
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            protoio::readLine(fd);
+            ADD_FAILURE() << "a console read with a timeout did not time out";
+        } catch (const Error& e) {
+            EXPECT_EQ(e.kind, Error::Kind::FileSystem);
+            EXPECT_EQ(e.sysErrno, ETIMEDOUT);
+        }
+        EXPECT_LT(std::chrono::steady_clock::now() - start, 3s);
+        protoio::setTimeout(fd, 10000);
+        typeKeys(in, L"h\u00E9\u20AC\r");
+        EXPECT_EQ(protoio::readLine(fd), "h\xC3\xA9\xE2\x82\xAC");  // "hé€"
+        typeKeys(in, L"\x1A\r");
+        EXPECT_EQ(protoio::readLine(fd), std::nullopt);
+        protoio::close(fd);
+        return;
+    }
+    TempDir d;
+    const std::string log = d / "child.txt";
+    SECURITY_ATTRIBUTES inherit{sizeof inherit, nullptr, TRUE};
+    const HANDLE out = ::CreateFileW(std::filesystem::path(std::u8string(log.begin(), log.end())).c_str(),
+                                     GENERIC_WRITE, FILE_SHARE_READ, &inherit, CREATE_ALWAYS, 0, nullptr);
+    ASSERT_NE(out, INVALID_HANDLE_VALUE);
+    wchar_t exe[MAX_PATH];
+    ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(exe) +
+                       L"\" --gtest_filter=Stream.ConsoleInputHonoursTimeoutsAndIsUtf8OnWindows";
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    si.dwFlags = STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = out;
+    si.hStdError = out;
+    PROCESS_INFORMATION pi{};
+    ::SetEnvironmentVariableW(L"PROTOIO_CONSOLE_CHILD", L"1");
+    const BOOL started = ::CreateProcessW(exe, cmd.data(), nullptr, nullptr, TRUE, CREATE_NEW_CONSOLE, nullptr,
+                                          nullptr, &si, &pi);
+    ::SetEnvironmentVariableW(L"PROTOIO_CONSOLE_CHILD", nullptr);
+    ::CloseHandle(out);
+    ASSERT_TRUE(started) << "error " << ::GetLastError();
+    const DWORD waited = ::WaitForSingleObject(pi.hProcess, 30000);
+    if (waited != WAIT_OBJECT_0) ::TerminateProcess(pi.hProcess, 1);
+    DWORD code = 1;
+    ::GetExitCodeProcess(pi.hProcess, &code);
+    ::CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hProcess);
+    const std::string report = protoio::file::read(log);
+    ASSERT_EQ(waited, WAIT_OBJECT_0) << "the console child hung:\n" << report;
+    if (report.find("[  SKIPPED ]") != std::string::npos) GTEST_SKIP() << report;
+    EXPECT_EQ(code, 0u) << report;
+}
+#endif
 
 TEST(Stream, LargeTransferThroughAPipe) {
     Pipe p;

@@ -415,6 +415,33 @@ TEST(HttpClient, HttpsVerifiesTheServerCertificate) {
     EXPECT_NE(std::string(e.what()).find("certificate"), std::string::npos) << e.what();
 }
 
+// The system's trust store is loaded: a public host's certificate verifies.
+// On Windows OpenSSL's default certificate locations are empty, so without
+// the Windows certificate store this handshake fails with "unable to get
+// local issuer certificate". It needs the network: when the host cannot be
+// reached the test is skipped with the reason (ctest lists it as skipped).
+TEST(HttpClient, HttpsToAPublicHostVerifiesAgainstTheSystemStore) {
+    const std::string host = "www.github.com";
+    try {
+        protoio::close(protoio::net::tcpConnect(host, 443, 5000));
+    } catch (const Error& e) {
+        GTEST_SKIP() << "no network access to " << host << ": " << e.what();
+    }
+    http::Request r;
+    r.method = "HEAD";
+    r.url = "https://" + host + "/";
+    r.timeoutMs = 15000;
+    r.maxRedirects = 0;
+    http::Response response;
+    try {
+        response = http::httpRequest(r);
+    } catch (const Error& e) {
+        FAIL() << "https://" << host << "/ failed: " << e.what();
+    }
+    EXPECT_GE(response.status, 200);
+    EXPECT_LT(response.status, 500);
+}
+
 TEST(HttpClient, ConnectionRefused) {
     RawServer* gone = new RawServer([](int) {});
     const std::string url = gone->url();

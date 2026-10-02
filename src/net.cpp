@@ -26,6 +26,7 @@
 #endif
 
 #include <openssl/err.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 
@@ -63,6 +64,22 @@ std::string tlsErrorText() {
 namespace net {
 
 using detail::netError;
+
+void trustCertificates(const std::string& pem) {
+    X509_STORE* store = SSL_CTX_get_cert_store(detail::tlsContext(true));
+    BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+    if (!bio) throw Error(Error::Kind::InvalidArgument, "cannot read certificates: " + detail::tlsErrorText());
+    int added = 0;
+    while (X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr)) {
+        // A certificate the store already holds is not an error.
+        X509_STORE_add_cert(store, cert);
+        X509_free(cert);
+        ++added;
+    }
+    BIO_free(bio);
+    ERR_clear_error();  // the end of the input is reported as an error
+    if (added == 0) throw Error(Error::Kind::InvalidArgument, "no PEM certificate to trust");
+}
 
 namespace {
 

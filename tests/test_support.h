@@ -62,18 +62,25 @@ private:
     RawServer raw_;
 };
 
-// A TLS server on 127.0.0.1 with a freshly generated self-signed certificate
-// for "localhost". For each connection it completes the handshake, reads one
-// line and answers "echo:<line>\n".
+// A TLS server on 127.0.0.1 for "localhost". For each connection it
+// completes the handshake, reads one line and answers "echo:<line>\n".
+//
+// Its certificate is freshly generated: self-signed by default, or, with
+// `caSigned`, issued by a freshly generated certificate authority (a CA
+// certificate with basic constraints CA:TRUE; the server certificate names
+// "localhost" and 127.0.0.1 as subject alternative names), whose certificate
+// caPem() answers so a test can trust it.
 class TlsEchoServer {
 public:
-    TlsEchoServer();
+    explicit TlsEchoServer(bool caSigned = false);
     ~TlsEchoServer();
     int port() const { return raw_ ? raw_->port() : 0; }
+    const std::string& caPem() const { return caPem_; }
 
 private:
     void* ctx_ = nullptr;  // SSL_CTX*
     RawServer* raw_ = nullptr;
+    std::string caPem_;
 };
 
 } // namespace protoio_test

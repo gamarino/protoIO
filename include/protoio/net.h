@@ -46,6 +46,13 @@ Address peerName(int fd);
 // throws ConnectionTimedOut.
 void tlsConnect(int fd, const std::string& host, bool verify = true);
 
+// Adds the PEM certificates in `pem` (one or more "BEGIN CERTIFICATE"
+// blocks) to the trust store tlsConnect (and https) verifies against, in
+// addition to the system's, for the rest of the process: a private
+// certificate authority, or a test's own. Throws InvalidArgument when `pem`
+// holds no certificate.
+void trustCertificates(const std::string& pem);
+
 // A UDP socket bound to host:port (an empty host: 0.0.0.0; port 0: a free
 // port). SO_REUSEADDR and SO_BROADCAST are set.
 int udpBind(const std::string& host, int port);

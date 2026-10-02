@@ -6,9 +6,23 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <functional>
+#include <optional>
+#include <string>
 #include <thread>
+#include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#else
+#include <cerrno>
+#endif
 
 using protoio::Error;
 namespace net = protoio::net;
@@ -51,31 +65,60 @@ TEST(Net, TcpConnectListenAcceptEcho) {
     protoio::close(listener);
 }
 
-TEST(Net, ConnectByNameAndOverIpv6Loopback) {
-#ifdef _WIN32
-    // Some Windows hosts (VPN or security software) drop all traffic to ::1,
-    // where "localhost" resolves first; nothing can connect there.
+// Why the IPv6 loopback address cannot be used on this host, or nothing when
+// it can. Some hosts have no IPv6 at all; on some Windows hosts VPN or
+// security software drops all traffic to ::1.
+std::optional<std::string> ipv6LoopbackUnusable() {
+    int probe = -1;
     try {
-        const int probe = net::tcpListen("::1", 0);
-        const int port = net::sockName(probe).port;
-        std::thread t([&] { if (auto c = net::tcpAccept(probe, 3000)) protoio::close(*c); });
-        try {
-            protoio::close(net::tcpConnect("::1", port, 1000));
-        } catch (const Error&) {
-            protoio::close(probe);  // wakes the acceptor
-            t.join();
-            GTEST_SKIP() << "the IPv6 loopback address ::1 does not answer on this host";
-        }
-        t.join();
-        protoio::close(probe);
+        probe = net::tcpListen("::1", 0);
     } catch (const Error& e) {
-        GTEST_SKIP() << "no IPv6 loopback: " << e.what();
+        return std::string("no IPv6 loopback: ") + e.what();
     }
-#endif
+    const int port = net::sockName(probe).port;
+    std::thread t([&] { if (auto c = net::tcpAccept(probe, 3000)) protoio::close(*c); });
+    std::optional<std::string> why;
+    try {
+        protoio::close(net::tcpConnect("::1", port, 1000));
+    } catch (const Error& e) {
+        why = std::string("the IPv6 loopback address ::1 does not answer: ") + e.what();
+    }
+    protoio::close(probe);  // wakes the acceptor if nothing connected
+    t.join();
+    return why;
+}
+
+TEST(Net, ConnectByName) {
     const int listener = net::tcpListen("localhost", 0);
-    const int port = net::sockName(listener).port;
+    const net::Address bound = net::sockName(listener);
+    if (bound.host == "::1") {
+        if (auto why = ipv6LoopbackUnusable()) {
+            protoio::close(listener);
+            GTEST_SKIP() << "\"localhost\" is ::1 first here, and " << *why;
+        }
+    }
     std::thread server([&] { if (auto c = net::tcpAccept(listener, 5000)) protoio::close(*c); });
-    const int s = net::tcpConnect("localhost", port, 2000);
+    const int s = net::tcpConnect("localhost", bound.port, 2000);
+    protoio::close(s);
+    server.join();
+    protoio::close(listener);
+}
+
+// Skipped, with the reason, where ::1 cannot be used; ctest then lists the
+// test as skipped, not passed (gtest_discover_tests matches "[  SKIPPED ]").
+TEST(Net, ConnectOverIpv6Loopback) {
+    if (auto why = ipv6LoopbackUnusable()) GTEST_SKIP() << *why;
+    const int listener = net::tcpListen("::1", 0);
+    const int port = net::sockName(listener).port;
+    std::thread server([&] {
+        auto c = net::tcpAccept(listener, 5000);
+        ASSERT_TRUE(c);
+        EXPECT_EQ(net::peerName(*c).host, "::1");
+        protoio::write(*c, "six\n");
+        protoio::close(*c);
+    });
+    const int s = net::tcpConnect("::1", port, 2000);
+    EXPECT_EQ(protoio::readLine(s), "six");
     protoio::close(s);
     server.join();
     protoio::close(listener);
@@ -141,6 +184,130 @@ TEST(Net, CloseWakesABlockedAccept) {
     EXPECT_EQ(got, std::nullopt);
 }
 
+// close wakes a thread waiting in accept, in a UDP receive and in a socket
+// read at once, not at the end of a polling interval: the median wake-up
+// latency over several rounds stays far below the 50 ms slices the waits
+// used to be cut into.
+TEST(Net, CloseWakesBlockedWaitersPromptly) {
+    using Clock = std::chrono::steady_clock;
+    constexpr int kRounds = 9;
+    auto median = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+    // Starts `wait` on a thread, closes `fd` once the thread is waiting, and
+    // answers the milliseconds from the close to the end of the wait.
+    auto latency = [](int fd, const std::function<void()>& wait) {
+        std::atomic<Clock::time_point> woke{};
+        std::thread t([&] {
+            wait();
+            woke = Clock::now();
+        });
+        std::this_thread::sleep_for(40ms);
+        const auto closed = Clock::now();
+        protoio::close(fd);
+        t.join();
+        return std::chrono::duration<double, std::milli>(woke.load() - closed).count();
+    };
+    std::vector<double> accept, udp, read;
+    for (int i = 0; i < kRounds; ++i) {
+        const int l = net::tcpListen("127.0.0.1", 0);
+        accept.push_back(latency(l, [&] { EXPECT_EQ(net::tcpAccept(l), std::nullopt); }));
+        const int u = net::udpBind("127.0.0.1", 0);
+        udp.push_back(latency(u, [&] { EXPECT_FALSE(net::udpReceive(u).has_value()); }));
+        int pair[2];
+        protoio_test::socketPair(pair);
+        read.push_back(latency(pair[0], [&] { EXPECT_EQ(protoio::readLine(pair[0]), std::nullopt); }));
+        protoio::close(pair[1]);
+    }
+    EXPECT_LT(median(accept), 15.0);
+    EXPECT_LT(median(udp), 15.0);
+    EXPECT_LT(median(read), 15.0);
+}
+
+// A listener whose backlog is full for a moment does not make connects fail
+// at once: on Windows, which answers such a connect with a reset, the
+// library retries a refused loopback connect for a short while.
+TEST(Net, ConnectsSurviveABrieflyFullBacklog) {
+    const int listener = net::tcpListen("127.0.0.1", 0, 1);
+    const int port = net::sockName(listener).port;
+    constexpr int kClients = 16;
+    std::vector<int> fds(kClients, -1);
+    std::vector<std::string> failures(kClients);
+    std::vector<std::thread> clients;
+    for (int i = 0; i < kClients; ++i) {
+        clients.emplace_back([&, i] {
+            try {
+                fds[i] = net::tcpConnect("127.0.0.1", port, 5000);
+            } catch (const Error& e) {
+                failures[i] = e.what();
+            }
+        });
+    }
+    // The listener starts accepting a little later, and keeps accepting
+    // until every client has its answer. (Linux completes the extra connects
+    // at once and lets the server catch up later; Windows refuses them.)
+    std::atomic<bool> stop{false};
+    std::thread acceptor([&] {
+        std::this_thread::sleep_for(50ms);
+        while (!stop.load())
+            if (auto c = net::tcpAccept(listener, 50)) protoio::close(*c);
+    });
+    for (auto& t : clients) t.join();
+    stop = true;
+    acceptor.join();
+    for (int i = 0; i < kClients; ++i) {
+        EXPECT_GE(fds[i], 0) << failures[i];
+        if (fds[i] >= 0) protoio::close(fds[i]);
+    }
+    protoio::close(listener);
+}
+
+// A server can listen on its port again right after it stopped, while the
+// connections it closed linger in TIME_WAIT.
+TEST(Net, APortCanBeListenedOnAgainWhileItsClosedConnectionsLinger) {
+    const int listener = net::tcpListen("127.0.0.1", 0);
+    const int port = net::sockName(listener).port;
+    std::thread server([&] {
+        auto c = net::tcpAccept(listener, 5000);
+        ASSERT_TRUE(c);
+        protoio::write(*c, "bye\n");
+        protoio::close(*c);  // the server closes first: its side enters TIME_WAIT
+    });
+    const int s = net::tcpConnect("127.0.0.1", port, 2000);
+    EXPECT_EQ(protoio::readLine(s), "bye");
+    EXPECT_EQ(protoio::readLine(s), std::nullopt);
+    server.join();
+    protoio::close(s);
+    protoio::close(listener);
+    int again = -1;
+    EXPECT_NO_THROW(again = net::tcpListen("127.0.0.1", port));
+    if (again >= 0) protoio::close(again);
+}
+
+// A port being listened on cannot be bound by another socket, not even one
+// that asks for SO_REUSEADDR (on Windows that option would let it take the
+// port over; the listener sets SO_EXCLUSIVEADDRUSE).
+TEST(Net, AListeningPortCannotBeTakenOver) {
+    const int listener = net::tcpListen("127.0.0.1", 0);
+    const int port = net::sockName(listener).port;
+    EXPECT_EQ(errorOf([&] { net::tcpListen("127.0.0.1", port); }).sysErrno, EADDRINUSE);
+#ifdef _WIN32
+    const SOCKET thief = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ASSERT_NE(thief, INVALID_SOCKET);
+    const BOOL one = TRUE;
+    ::setsockopt(thief, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&one), sizeof one);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(static_cast<u_short>(port));
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    EXPECT_EQ(::bind(thief, reinterpret_cast<sockaddr*>(&a), sizeof a), SOCKET_ERROR)
+        << "a second socket took over the listening port";
+    ::closesocket(thief);
+#endif
+    protoio::close(listener);
+}
+
 TEST(Net, ConnectionRefusedKind) {
     const int listener = net::tcpListen("127.0.0.1", 0);
     const int port = net::sockName(listener).port;
@@ -189,6 +356,43 @@ TEST(Net, TlsVerificationRefusesASelfSignedCertificate) {
     EXPECT_EQ(e.kind, Error::Kind::Network);
     EXPECT_NE(std::string(e.what()).find("certificate"), std::string::npos) << e.what();
     protoio::close(s);
+}
+
+// A successful verified handshake, not only a refused one: the chain is
+// built up to a certificate authority in the store tlsConnect verifies
+// against, and the server's certificate must name the host. The CA is
+// generated by the test and unknown to the system, so the handshake can only
+// succeed through trustCertificates; before that call it must fail.
+TEST(Net, TlsVerifiedHandshakeWithATrustedCertificateAuthority) {
+    protoio_test::TlsEchoServer server(true);
+    auto connect = [&] {
+        const int s = net::tcpConnect("127.0.0.1", server.port(), 2000);
+        protoio::setTimeout(s, 5000);
+        return s;
+    };
+    int s = connect();
+    Error untrusted = errorOf([&] { net::tlsConnect(s, "localhost", true); });
+    EXPECT_EQ(untrusted.kind, Error::Kind::Network);
+    EXPECT_NE(std::string(untrusted.what()).find("certificate"), std::string::npos) << untrusted.what();
+    protoio::close(s);
+
+    net::trustCertificates(server.caPem());
+    s = connect();
+    net::tlsConnect(s, "localhost", true);
+    protoio::write(s, "verified\n");
+    EXPECT_EQ(protoio::readLine(s), "echo:verified");
+    protoio::close(s);
+
+    // The host name is still checked against the trusted certificate.
+    s = connect();
+    Error wrongName = errorOf([&] { net::tlsConnect(s, "example.com", true); });
+    EXPECT_EQ(wrongName.kind, Error::Kind::Network);
+    EXPECT_NE(std::string(wrongName.what()).find("certificate"), std::string::npos) << wrongName.what();
+    protoio::close(s);
+}
+
+TEST(Net, TrustCertificatesNeedsACertificate) {
+    EXPECT_EQ(errorOf([] { net::trustCertificates("no certificate here"); }).kind, Error::Kind::InvalidArgument);
 }
 
 TEST(Net, ConcurrentReaderAndWriterOnOneTcpSocket) {

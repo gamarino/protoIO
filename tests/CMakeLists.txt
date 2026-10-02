@@ -30,6 +30,11 @@ if(WIN32)
     # Windows lacks the POSIX commands the process tests run (sh, cat, ...):
     # a small program stands in for them.
     add_executable(protoio_testchild testchild.cpp)
+    target_link_libraries(protoio_testchild PRIVATE shell32)
+    if(MSVC)
+        target_compile_options(protoio_testchild PRIVATE /utf-8)
+        target_compile_definitions(protoio_testchild PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
 
     # The OpenSSL DLLs go next to the test programs, so they run (and are
     # listed right after the build) without OpenSSL's bin directory on PATH.

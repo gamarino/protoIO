@@ -6,8 +6,10 @@
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <cstdlib>
 #include <stdexcept>
@@ -123,31 +125,72 @@ HttpServer::HttpServer(HttpHandler handler)
 
 namespace {
 
-SSL_CTX* makeServerContext() {
-    EVP_PKEY* key = EVP_EC_gen("P-256");
+// A certificate for `key`, valid for an hour, named `cn` and signed by
+// `issuerKey` under `issuer`'s name (itself when `issuer` is null).
+X509* makeCertificate(EVP_PKEY* key, const char* cn, X509* issuer, EVP_PKEY* issuerKey, long serial,
+                      const char* extensions[][2]) {
     X509* cert = X509_new();
     X509_set_version(cert, 2);
-    ASN1_INTEGER_set(X509_get_serialNumber(cert), 1);
-    X509_gmtime_adj(X509_getm_notBefore(cert), 0);
+    ASN1_INTEGER_set(X509_get_serialNumber(cert), serial);
+    X509_gmtime_adj(X509_getm_notBefore(cert), -60);
     X509_gmtime_adj(X509_getm_notAfter(cert), 3600);
     X509_set_pubkey(cert, key);
     X509_NAME* name = X509_get_subject_name(cert);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
-    X509_set_issuer_name(cert, name);
-    X509_sign(cert, key, EVP_sha256());
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(cn), -1, -1, 0);
+    X509_set_issuer_name(cert, issuer ? X509_get_subject_name(issuer) : name);
+    X509V3_CTX v3;
+    X509V3_set_ctx(&v3, issuer ? issuer : cert, cert, nullptr, nullptr, 0);
+    for (int i = 0; extensions && extensions[i][0]; ++i) {
+        X509_EXTENSION* ext = X509V3_EXT_conf(nullptr, &v3, extensions[i][0], extensions[i][1]);
+        if (!ext) throw std::runtime_error(std::string("bad certificate extension ") + extensions[i][0]);
+        X509_add_ext(cert, ext, -1);
+        X509_EXTENSION_free(ext);
+    }
+    X509_sign(cert, issuerKey, EVP_sha256());
+    return cert;
+}
+
+SSL_CTX* makeServerContext(bool caSigned, std::string& caPem) {
+    EVP_PKEY* key = EVP_EC_gen("P-256");
+    X509* cert = nullptr;
+    X509* ca = nullptr;
+    if (caSigned) {
+        EVP_PKEY* caKey = EVP_EC_gen("P-256");
+        const char* caExt[][2] = {{"basicConstraints", "critical,CA:TRUE"},
+                                  {"keyUsage", "critical,keyCertSign,cRLSign"},
+                                  {"subjectKeyIdentifier", "hash"},
+                                  {nullptr, nullptr}};
+        ca = makeCertificate(caKey, "protoIO test CA", nullptr, caKey, 1, caExt);
+        const char* leafExt[][2] = {{"basicConstraints", "critical,CA:FALSE"},
+                                    {"keyUsage", "critical,digitalSignature"},
+                                    {"extendedKeyUsage", "serverAuth"},
+                                    {"subjectAltName", "DNS:localhost,IP:127.0.0.1"},
+                                    {"authorityKeyIdentifier", "keyid"},
+                                    {nullptr, nullptr}};
+        cert = makeCertificate(key, "localhost", ca, caKey, 2, leafExt);
+        BIO* mem = BIO_new(BIO_s_mem());
+        PEM_write_bio_X509(mem, ca);
+        char* data = nullptr;
+        const long n = BIO_get_mem_data(mem, &data);
+        caPem.assign(data, static_cast<std::size_t>(n));
+        BIO_free(mem);
+        EVP_PKEY_free(caKey);
+    } else {
+        cert = makeCertificate(key, "localhost", nullptr, key, 1, nullptr);
+    }
     SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
     SSL_CTX_use_certificate(ctx, cert);
     SSL_CTX_use_PrivateKey(ctx, key);
     X509_free(cert);
+    if (ca) X509_free(ca);
     EVP_PKEY_free(key);
     return ctx;
 }
 
 } // namespace
 
-TlsEchoServer::TlsEchoServer() {
-    SSL_CTX* ctx = makeServerContext();
+TlsEchoServer::TlsEchoServer(bool caSigned) {
+    SSL_CTX* ctx = makeServerContext(caSigned, caPem_);
     ctx_ = ctx;
     raw_ = new RawServer([ctx](int fd) {
         SSL* ssl = SSL_new(ctx);

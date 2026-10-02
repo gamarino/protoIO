@@ -185,6 +185,45 @@ TEST(File, OpenGivesAStreamDescriptor) {
     protoio::close(r);
 }
 
+// A file a stream has open can still be deleted, renamed and replaced by a
+// rename, as on POSIX: the stream keeps the file it opened. On Windows this
+// needs every descriptor opened with FILE_SHARE_DELETE and a rename that
+// replaces its target.
+TEST(File, AnOpenFileCanBeDeletedRenamedAndReplaced) {
+    TempDir d;
+    // Deleted while open for reading: the name is gone, the stream still reads.
+    file::write(d / "a", "alpha\n");
+    const int r = file::open(d / "a", file::Mode::Read);
+    EXPECT_TRUE(file::remove(d / "a"));
+    EXPECT_FALSE(file::stat(d / "a"));
+    EXPECT_EQ(protoio::readAll(r), "alpha\n");
+    protoio::close(r);
+
+    // Replaced by a rename (the atomic-save pattern) while open for reading.
+    file::write(d / "t", "old\n");
+    const int rt = file::open(d / "t", file::Mode::Read);
+    file::write(d / "t.new", "new\n");
+    file::move(d / "t.new", d / "t");
+    EXPECT_EQ(file::read(d / "t"), "new\n");
+    EXPECT_EQ(protoio::readAll(rt), "old\n");
+    protoio::close(rt);
+
+    // Renamed while open for writing: the stream writes on under the new name.
+    const int w = file::open(d / "w", file::Mode::Write);
+    protoio::write(w, "one\n");
+    file::move(d / "w", d / "w2");
+    protoio::write(w, "two\n");
+    protoio::close(w);
+    EXPECT_EQ(file::read(d / "w2"), "one\ntwo\n");
+
+    // Deleted while open for writing, and the name is free for a new file at once.
+    const int h = file::open(d / "h", file::Mode::Write);
+    EXPECT_TRUE(file::remove(d / "h"));
+    file::write(d / "h", "fresh");
+    EXPECT_EQ(file::read(d / "h"), "fresh");
+    protoio::close(h);
+}
+
 TEST(File, ReopenedNumberStartsWithAFreshBuffer) {
     TempDir d;
     file::write(d / "one", "1a\n1b\n");
