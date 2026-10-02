@@ -362,7 +362,7 @@ TEST(HttpClient, GetHasNoContentLengthPostDoesAndTheUserAgentNamesTheVersion) {
     ASSERT_EQ(seen.size(), 2u);
     EXPECT_EQ(http::find(seen[0], "content-length"), std::nullopt);
     EXPECT_EQ(http::find(seen[1], "content-length"), "1");
-    EXPECT_EQ(http::find(seen[0], "user-agent"), "protoIO/0.1.0");
+    EXPECT_EQ(http::find(seen[0], "user-agent"), std::string("protoIO/") + PROTOIO_TEST_VERSION);
     EXPECT_EQ(http::find(seen[0], "host"), "127.0.0.1:" + std::to_string(server.port()));
     EXPECT_EQ(http::find(seen[0], "accept"), "*/*");
 }

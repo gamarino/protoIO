@@ -53,6 +53,7 @@ function(protoio_test name label)
     add_executable(${name} ${name}.cpp test_support.cpp)
     target_link_libraries(${name} PRIVATE protoIO::protoio GTest::gtest_main)
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(${name} PRIVATE PROTOIO_TEST_VERSION="${PROJECT_VERSION}")
     if(MSVC)
         target_compile_options(${name} PRIVATE /utf-8)
         target_compile_definitions(${name} PRIVATE _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS

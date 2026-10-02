@@ -5,17 +5,80 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.2.0 - 2026-10-02
+
+Native Windows and macOS support, and the fixes of the Windows-port review.
+Behaviour changes on Windows (see "Changed"), hence the minor version:
+consumers ask for `find_package(protoIO 0.2 CONFIG)`.
+
 ### Added
 
 - Native Windows support (MSVC 2022, Winsock, Win32): `src/platform_win.cpp`
-  (socket descriptors, error mapping, UTF-8 conversion), `src/file_win.cpp`
-  and `src/process_win.cpp` (`CreateProcessW`), and `#ifdef _WIN32` blocks in
-  the stream and network code. The POSIX build is unchanged. See README.md,
-  "Windows", for what differs there.
+  (socket descriptors, error mapping, UTF-8 conversion, descriptor reads),
+  `src/file_win.cpp` and `src/process_win.cpp` (`CreateProcessW`), and
+  `#ifdef _WIN32` blocks in the stream and network code. The POSIX build is
+  unchanged. See README.md, "Windows", for what differs there.
+- macOS support (Apple clang): descriptors made close-on-exec and free of
+  SIGPIPE without SOCK_CLOEXEC, accept4, pipe2 or MSG_NOSIGNAL.
 - `net::nativeSocket(fd)` (Windows only): the `SOCKET` behind a descriptor.
+- `net::trustCertificates(pem)`: extra trusted certificates (a private CA,
+  a test's own) for verified TLS and https.
+- `PROTOIO_WARNINGS_AS_ERRORS` CMake option (off by default; CI turns it
+  on: no warnings at `/W4` or `-Wall -Wextra -Wpedantic`).
+- CI on Linux, macOS and Windows.
 - Tests: non-ASCII file names, a read timeout on a pipe; on Windows, argument
   quoting, PATH search and unsupported signals, with a small child program
   (`tests/testchild.cpp`) standing in for `sh`, `cat`, `true` and `sleep`.
+  For the review: a successful verified TLS handshake against a generated
+  CA, https to a public host through the system trust store, deleting and
+  renaming open files, batch-file refusal, no working-directory search,
+  crash exit codes, Unicode argv and environment, console input, text-mode
+  descriptors, close wake-up latency, a briefly full backlog, re-listening
+  while connections linger, port take-over.
+
+### Changed (Windows)
+
+- `run` and `spawn` resolve `argv[0]` themselves and never search the
+  working directory; `.bat` and `.cmd` targets throw `InvalidArgument`
+  (BatBadBut, CVE-2024-24576). The README no longer suggests `cmd /c` as
+  the way to run a batch file with arguments: it is a shell, like `sh -c`.
+- A child that ends with an exception (an NTSTATUS code) answers 128 + the
+  matching POSIX signal (139 for an access violation, 130 for Ctrl+C, 134
+  for any other NTSTATUS error), not the raw negative code.
+- The library reads every descriptor as bytes (`ReadFile`), bypassing the C
+  runtime's text mode: a Ctrl+Z byte on standard input is data, CR LF
+  arrives unchanged. The console is read as UTF-8 (`ReadConsoleW`); a line
+  that starts with Ctrl+Z ends it.
+- Files are opened with delete sharing, so an open file can be deleted,
+  renamed and replaced; `move` replaces its target with POSIX semantics.
+- Listeners set `SO_EXCLUSIVEADDRUSE`.
+- A refused loopback connect is retried for about 0.3 s, so a briefly full
+  backlog (which Windows answers with a reset) no longer fails a connect at
+  once; a port nobody listens on is refused after about 0.3 s.
+
+### Fixed
+
+- Windows: verified TLS (and every https request) failed with "unable to
+  get local issuer certificate": the verifying context now loads the
+  Windows ROOT and CA certificate stores.
+- Windows: socket waits polled in 50 ms slices and pipe reads with a timeout
+  every 5 ms. A socket wait now also waits on the thread's wake-up socket,
+  which `close` signals; a pipe or console read blocks in the read and a
+  thread-pool timer cancels it at the deadline.
+- Windows: read timeouts were ignored on console input.
+- Windows: `udpSend` ignored the descriptor's timeout and could retry
+  forever on a full send buffer.
+- Windows: if `run` could not start its standard-error reader thread while
+  the input feeder ran, the process ended in `std::terminate`; now the child
+  is ended, started threads joined and the error rethrown.
+- Windows: the child's pipe ends were inheritable for their whole life, so a
+  concurrent `system()` could inherit them; now only duplicates scoped to
+  the `CreateProcessW` call are (the residual window is documented).
+- macOS: close now wakes a thread waiting on a listening or UDP socket at
+  once, through the same per-thread wake-up channel (a pipe), instead of
+  within a 50 ms slice.
+- The IPv6 loopback test is split from the by-name test and reports a host
+  without a usable `::1` as skipped, with the reason.
 
 ## 0.1.0 - 2026-09-30
 

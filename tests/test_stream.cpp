@@ -315,7 +315,8 @@ void typeKeys(HANDLE in, const std::wstring& text) {
             r.EventType = KEY_EVENT;
             r.Event.KeyEvent.bKeyDown = down;
             r.Event.KeyEvent.wRepeatCount = 1;
-            r.Event.KeyEvent.wVirtualKeyCode = c == L'\r' ? VK_RETURN : 0;
+            // VK_PACKET: a character typed by its code, as SendInput does.
+            r.Event.KeyEvent.wVirtualKeyCode = c == L'\r' ? VK_RETURN : VK_PACKET;
             r.Event.KeyEvent.uChar.UnicodeChar = c;
             keys.push_back(r);
         }
@@ -339,6 +340,19 @@ TEST(Stream, ConsoleInputHonoursTimeoutsAndIsUtf8OnWindows) {
         const int fd = ::_open_osfhandle(reinterpret_cast<intptr_t>(in), _O_RDONLY | _O_BINARY);
         ASSERT_GE(fd, 0);
         protoio::forget(fd);
+        // Each step reports its own failure, so one report shows them all.
+        auto line = [&](const char* step) -> std::optional<std::string> {
+            try {
+                return protoio::readLine(fd);
+            } catch (const Error& e) {
+                ADD_FAILURE() << step << ": " << e.what();
+                return std::string("<error>");
+            }
+        };
+        protoio::setTimeout(fd, 5000);
+        typeKeys(in, L"ab\r");
+        EXPECT_EQ(line("typed ASCII"), "ab");
+
         protoio::setTimeout(fd, 300);
         const auto start = std::chrono::steady_clock::now();
         try {
@@ -349,11 +363,12 @@ TEST(Stream, ConsoleInputHonoursTimeoutsAndIsUtf8OnWindows) {
             EXPECT_EQ(e.sysErrno, ETIMEDOUT);
         }
         EXPECT_LT(std::chrono::steady_clock::now() - start, 3s);
-        protoio::setTimeout(fd, 10000);
+
+        protoio::setTimeout(fd, 5000);
         typeKeys(in, L"h\u00E9\u20AC\r");
-        EXPECT_EQ(protoio::readLine(fd), "h\xC3\xA9\xE2\x82\xAC");  // "hé€"
+        EXPECT_EQ(line("typed after a timeout"), "h\xC3\xA9\xE2\x82\xAC");  // "hé€"
         typeKeys(in, L"\x1A\r");
-        EXPECT_EQ(protoio::readLine(fd), std::nullopt);
+        EXPECT_EQ(line("Ctrl+Z"), std::nullopt);
         protoio::close(fd);
         return;
     }
