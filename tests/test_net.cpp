@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <functional>
 #include <optional>
 #include <string>
@@ -225,6 +226,9 @@ TEST(Net, CloseWakesBlockedWaitersPromptly) {
         read.push_back(latency(pair[0], [&] { EXPECT_EQ(protoio::readLine(pair[0]), std::nullopt); }));
         protoio::close(pair[1]);
     }
+    // Reported, so a CI log shows the latency itself, not only a pass.
+    std::printf("median wake-up after close (ms): accept %.2f, udp %.2f, read %.2f\n", median(accept), median(udp),
+                median(read));
     EXPECT_LT(median(accept), 15.0);
     EXPECT_LT(median(udp), 15.0);
     EXPECT_LT(median(read), 15.0);
