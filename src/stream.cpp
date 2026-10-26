@@ -444,6 +444,33 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
     }
 }
 
+namespace {
+
+// The unread input: buf[head, buf.size()).
+std::string_view unread(const FdState& st) {
+    return std::string_view(st.buf).substr(st.head);
+}
+
+// Marks the next `n` unread bytes as consumed.
+void consume(FdState& st, std::size_t n) {
+    st.head += n;
+    if (st.head == st.buf.size()) {
+        st.buf.clear();
+        st.head = 0;
+    }
+}
+
+// Moves the unread input to the front of the buffer. Called only before a
+// read appends to it, so each byte moves at most once per read(2) instead of
+// once per line taken.
+void compact(FdState& st) {
+    if (st.head == 0) return;
+    st.buf.erase(0, st.head);
+    st.head = 0;
+}
+
+} // namespace
+
 bool fill(FdState& st) {
     if (st.eof) return false;
     char chunk[65536];
@@ -453,37 +480,47 @@ bool fill(FdState& st) {
         fileError("descriptor " + std::to_string(st.fd), errno, "cannot read from");
     }
     if (r == 0) { st.eof = true; return false; }
+    compact(st);
     st.buf.append(chunk, static_cast<std::size_t>(r));
     return true;
 }
 
 bool takeLine(FdState& st, std::size_t max, std::string& line) {
+    // Offsets are relative to the unread input, which fill() may move.
     std::size_t pos, scanned = 0;
     for (;;) {
-        pos = st.buf.find('\n', scanned);
-        if (pos != std::string::npos) break;
-        scanned = st.buf.size();
+        pos = unread(st).find('\n', scanned);
+        if (pos != std::string_view::npos) break;
+        scanned = unread(st).size();
         // A line of `max` bytes may still be followed by CR LF, so only more
         // than max + 1 bytes without a LF prove the line too long. The stream
         // is left where it was.
         if (max && scanned > max + 1) lineTooLong(max);
         if (!fill(st)) break;
     }
-    const bool complete = pos != std::string::npos;
-    std::size_t len = complete ? pos : st.buf.size();
+    const std::string_view in = unread(st);
+    const bool complete = pos != std::string_view::npos;
+    std::size_t len = complete ? pos : in.size();
     if (!complete && len == 0) return false;
-    if (len > 0 && st.buf[len - 1] == '\r') --len;
+    if (len > 0 && in[len - 1] == '\r') --len;
     if (max && len > max) lineTooLong(max);
-    line.assign(st.buf, 0, len);
-    st.buf.erase(0, complete ? pos + 1 : st.buf.size());
+    line.assign(in.data(), len);
+    consume(st, complete ? pos + 1 : in.size());
     return true;
 }
 
+bool takeBufferedLine(FdState& st, std::size_t max, std::string& line) {
+    // Without a LF in the buffer only a read can complete the line.
+    if (unread(st).find('\n') == std::string_view::npos) return false;
+    return takeLine(st, max, line);  // finds that LF, so never reads
+}
+
 std::string takeBytes(FdState& st, std::size_t n) {
-    while (st.buf.size() < n && fill(st)) {}
-    const std::size_t take = std::min(st.buf.size(), n);
-    std::string got = st.buf.substr(0, take);
-    st.buf.erase(0, take);
+    while (unread(st).size() < n && fill(st)) {}
+    const std::string_view in = unread(st);
+    const std::size_t take = std::min(in.size(), n);
+    std::string got(in.substr(0, take));
+    consume(st, take);
     return got;
 }
 
@@ -501,12 +538,22 @@ std::optional<std::string> readLine(int fd, std::size_t max) {
     return line;
 }
 
+std::optional<std::string> readBufferedLine(int fd, std::size_t max) {
+    auto st = fdState(fd);
+    // Never wait: a reader that holds the lock may be blocked in a read.
+    std::unique_lock<std::mutex> lock(st->readMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return std::nullopt;
+    std::string line;
+    if (!detail::takeBufferedLine(*st, max, line)) return std::nullopt;
+    return line;
+}
+
 std::string readAll(int fd) {
     auto st = fdState(fd);
     std::lock_guard<std::mutex> lock(st->readMutex);
     while (detail::fill(*st)) {}
-    std::string all;
-    all.swap(st->buf);
+    std::string all(detail::unread(*st));
+    detail::consume(*st, all.size());
     return all;
 }
 
@@ -524,7 +571,7 @@ std::optional<std::string> readChars(int fd, std::size_t n) {
     // The byte length of the first `n` characters, or npos when the buffer
     // does not hold them all yet (a lead byte is any byte that is not
     // 10xxxxxx; its sequence length comes from its high bits).
-    auto prefix = [n](const std::string& b) -> std::size_t {
+    auto prefix = [n](std::string_view b) -> std::size_t {
         std::size_t i = 0;
         for (std::size_t c = 0; c < n; ++c) {
             if (i >= b.size()) return std::string::npos;
@@ -537,10 +584,10 @@ std::optional<std::string> readChars(int fd, std::size_t n) {
         return i;
     };
     std::size_t take;
-    while ((take = prefix(st->buf)) == std::string::npos && detail::fill(*st)) {}
-    if (take == std::string::npos) take = st->buf.size();  // end of stream: what is left
-    std::string got = st->buf.substr(0, take);
-    st->buf.erase(0, take);
+    while ((take = prefix(detail::unread(*st))) == std::string::npos && detail::fill(*st)) {}
+    if (take == std::string::npos) take = detail::unread(*st).size();  // end of stream: what is left
+    std::string got(detail::unread(*st).substr(0, take));
+    detail::consume(*st, take);
     if (got.empty() && n > 0) return std::nullopt;
     return got;
 }
@@ -548,7 +595,7 @@ std::optional<std::string> readChars(int fd, std::size_t n) {
 bool atEnd(int fd) {
     auto st = fdState(fd);
     std::lock_guard<std::mutex> lock(st->readMutex);
-    return st->buf.empty() && !detail::fill(*st);
+    return detail::unread(*st).empty() && !detail::fill(*st);
 }
 
 void write(int fd, std::string_view data) {

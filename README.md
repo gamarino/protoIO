@@ -47,7 +47,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 | Header | Contents |
 |---|---|
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
-| `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
+| `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readBufferedLine(fd, max = 0)` (a line already buffered, never blocking), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
 | `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir` |
 | `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `run(argv, RunOptions{input, directory, environment})` also sets the child's working directory and replaces its environment, without a shell; `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
 | `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)` (an empty host: one dual-stack socket, IPv4 and IPv6), `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
@@ -151,7 +151,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --output-on-failure
 
-# Debian package: protoio-dev_0.2.2_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.2.3_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 

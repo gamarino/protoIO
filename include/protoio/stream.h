@@ -13,8 +13,9 @@
 // descriptor (files, pipes, the standard streams) or the number the library
 // gives each socket it creates; see README.md, "Windows".
 //
-// Every function here may block. A runtime calls it inside its own "leave the
-// collector's quorum" bracket; the library touches no runtime object.
+// Every function here may block, except readBufferedLine. A runtime calls them
+// inside its own "leave the collector's quorum" bracket; the library touches
+// no runtime object.
 //
 // Threads: one descriptor may be used from several threads at once.
 //   * Reads are serialised (the read-ahead buffer is consumed atomically:
@@ -53,6 +54,14 @@ private:
 // stream. The last line may lack its LF. With `max` > 0, a line longer than
 // `max` bytes throws LineTooLong.
 std::optional<std::string> readLine(int fd, std::size_t max = 0);
+
+// The next line, as readLine answers it, when the read-ahead buffer already
+// holds all of it; std::nullopt when it does not, or when another thread is
+// reading the descriptor. It never reads and never waits, so a runtime may
+// call it without leaving the collector's quorum, and call readLine (inside
+// that bracket) only when it answers std::nullopt. Lines come off the same
+// buffer as readLine's, so the two can be mixed freely.
+std::optional<std::string> readBufferedLine(int fd, std::size_t max = 0);
 
 // Everything up to the end of the stream (possibly empty).
 std::string readAll(int fd);

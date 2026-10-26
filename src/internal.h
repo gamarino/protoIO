@@ -134,7 +134,11 @@ struct FdState {
     std::mutex readMutex;
     std::mutex writeMutex;
     std::mutex sslMutex;
+    // The read-ahead buffer. Its unread input is buf[head, buf.size()): a read
+    // only advances `head`, and fill() drops the consumed front before it
+    // appends, so a line costs no move of the rest of the buffer.
     std::string buf;                  // guarded by readMutex
+    std::size_t head = 0;             // guarded by readMutex
     bool eof = false;                 // guarded by readMutex
     std::atomic<SSL*> ssl{nullptr};
     std::atomic<int> timeoutMs{-1};   // -1: block without limit
@@ -164,14 +168,18 @@ bool waitReady(FdState& st, short events, int timeoutMs);
 // setting `closed`).
 void wakeWaiters(FdState& st);
 
-// Reads more input into the buffer; false at the end of the stream. The
-// caller holds readMutex.
+// Reads more input into the buffer, first dropping its consumed front; false
+// at the end of the stream. The caller holds readMutex.
 bool fill(FdState& st);
 
 // A line without its end (LF or CRLF), or false at the end of the stream. A
 // line longer than `max` bytes (0: no limit) throws LineTooLong. The caller
 // holds readMutex.
 bool takeLine(FdState& st, std::size_t max, std::string& line);
+
+// takeLine when the buffer already holds the line's LF; false, having read
+// nothing, when it does not. The caller holds readMutex.
+bool takeBufferedLine(FdState& st, std::size_t max, std::string& line);
 
 // Up to `n` bytes from the buffer and the stream (fewer only at the end).
 // The caller holds readMutex.

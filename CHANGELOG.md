@@ -5,6 +5,28 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.2.3 - not yet tagged
+
+### Added
+
+- `readBufferedLine(fd, max)`: the next line when the read-ahead buffer
+  already holds all of it, else `std::nullopt`; it never reads and never
+  waits (it answers `std::nullopt` when another thread holds the read lock).
+  A runtime can take most lines without leaving the collector's quorum and
+  call `readLine` inside that bracket only when a read is needed. Lines come
+  off the same buffer as `readLine`'s, so the two mix freely.
+
+### Changed
+
+- Reading a line no longer moves the rest of the 64 KiB read-ahead buffer to
+  its front (`erase(0, n)` per line, about 32 KiB moved per line on
+  average). The buffer keeps an offset to its first unread byte; the
+  consumed front is dropped only when the next read appends to it. On a
+  1.4 million-line file this was about 0.9 s of a protoClojure `line-seq`
+  pass (benchmarks/reports/2026-10-25-grep-gap in protoClojure). Every
+  reader (`readLine`, `readBytes`, `readChars`, `readAll`, `atEnd` and the
+  HTTP layer) shares the offset.
+
 ## 0.2.2 - 2026-10-02
 
 ### Added

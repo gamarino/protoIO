@@ -151,6 +151,170 @@ TEST(Stream, ReadLineMaxStopsReadingAnEndlessLine) {
     }
 }
 
+// Lines of every length from 0 to 2,999 bytes, so that many of them straddle
+// the boundary of a 64 KiB read, written in pieces whose sizes do not divide
+// the buffer's.
+TEST(Stream, LinesSpanningBufferRefillsComeBackWhole) {
+    Pipe p;
+    std::vector<std::string> lines;
+    std::string data;
+    for (int i = 0; i < 1500; ++i) {
+        lines.push_back(std::to_string(i) + ":" + std::string((i * 7919) % 3000, static_cast<char>('a' + i % 26)));
+        data += lines.back() + (i % 3 == 0 ? "\r\n" : "\n");
+    }
+    std::thread writer([&] {
+        for (std::size_t at = 0; at < data.size(); at += 40009) protoio::write(p.w, data.substr(at, 40009));
+        p.closeWriter();
+    });
+    for (std::size_t i = 0; i < lines.size(); ++i) ASSERT_EQ(protoio::readLine(p.r), lines[i]) << "line " << i;
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    writer.join();
+}
+
+TEST(Stream, CrlfSplitAcrossTwoReadsIsOneLineEnd) {
+    Pipe p;
+    protoio::write(p.w, "abc\r");
+    std::thread writer([&] {
+        std::this_thread::sleep_for(100ms);  // the first read sees only "abc\r"
+        protoio::write(p.w, "\ndef\r\n");
+        p.closeWriter();
+    });
+    EXPECT_EQ(protoio::readLine(p.r), "abc");
+    EXPECT_EQ(protoio::readLine(p.r), "def");
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    writer.join();
+}
+
+TEST(Stream, LastLineWithoutNewlineAfterARefill) {
+    Pipe p;
+    const std::string first(70000, 'f');
+    std::thread writer([&] {
+        protoio::write(p.w, first + "\nsecond\nno newline at the end");
+        p.closeWriter();
+    });
+    EXPECT_EQ(protoio::readLine(p.r), first);
+    EXPECT_EQ(protoio::readLine(p.r), "second");
+    EXPECT_EQ(protoio::readLine(p.r), "no newline at the end");
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    writer.join();
+}
+
+TEST(Stream, VeryLongLinesAndTheLimitAcrossRefills) {
+    Pipe p;
+    const std::string huge(3 * 1024 * 1024 + 17, 'h');
+    const std::string big(200000, 'b');
+    std::thread writer([&] {
+        protoio::write(p.w, "short\n" + huge + "\n" + big + "\nafter\n");
+        p.closeWriter();
+    });
+    EXPECT_EQ(protoio::readLine(p.r), "short");
+    EXPECT_EQ(protoio::readLine(p.r), huge);
+    try {
+        protoio::readLine(p.r, 100000);
+        FAIL() << "expected LineTooLong";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::LineTooLong);
+    }
+    // The stream is left where it was: the long line is still there.
+    EXPECT_EQ(protoio::readLine(p.r), big);
+    EXPECT_EQ(protoio::readLine(p.r, 5), "after");
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    writer.join();
+}
+
+TEST(Stream, BinaryAndUtf8LinesArePassedThroughByteForByte) {
+    Pipe p;
+    std::string binary;
+    for (int c = 0; c < 256; ++c)
+        if (c != '\n') binary.push_back(static_cast<char>(c));
+    binary.push_back('x');  // a CR before the LF would be taken as CRLF
+    const std::string utf8 = "na\xC3\xAFve \xE2\x82\xAC \xF0\x9F\x98\x80 \xE4\xB8\xAD\xE6\x96\x87";
+    // The 4-byte character is cut between two reads.
+    const std::string text = utf8 + "\n" + binary + "\n";
+    const std::size_t cut = utf8.find("\xF0") + 2;
+    protoio::write(p.w, text.substr(0, cut));
+    std::thread writer([&] {
+        std::this_thread::sleep_for(100ms);
+        protoio::write(p.w, text.substr(cut));
+        p.closeWriter();
+    });
+    EXPECT_EQ(protoio::readLine(p.r), utf8);
+    EXPECT_EQ(protoio::readLine(p.r), binary);
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    writer.join();
+}
+
+// Every reader consumes from the same buffer, wherever a line left it.
+TEST(Stream, OtherReadsContinueWhereALineLeftTheBuffer) {
+    Pipe p;
+    protoio::write(p.w, "line one\nabcdef\xC3\xA9g\nline three\nthe rest\nand more");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readLine(p.r), "line one");
+    EXPECT_EQ(protoio::readBytes(p.r, 3), "abc");
+    EXPECT_EQ(protoio::readChars(p.r, 4), "def\xC3\xA9");
+    EXPECT_EQ(protoio::readLine(p.r), "g");
+    EXPECT_EQ(protoio::readBufferedLine(p.r), "line three");
+    EXPECT_FALSE(protoio::atEnd(p.r));
+    EXPECT_EQ(protoio::readAll(p.r), "the rest\nand more");
+    EXPECT_TRUE(protoio::atEnd(p.r));
+}
+
+TEST(Stream, ReadBufferedLineNeverReads) {
+    Pipe p;
+    protoio::write(p.w, "first\nsecond\r\npartial");
+    // Nothing read yet: the buffer is empty.
+    EXPECT_EQ(protoio::readBufferedLine(p.r), std::nullopt);
+    EXPECT_EQ(protoio::readLine(p.r), "first");
+    EXPECT_EQ(protoio::readBufferedLine(p.r), "second");
+    // "partial" has no LF yet, and the writer is still open: only a read could
+    // complete it, so the call answers at once.
+    EXPECT_EQ(protoio::readBufferedLine(p.r), std::nullopt);
+    protoio::write(p.w, " line\nlast");
+    p.closeWriter();
+    EXPECT_EQ(protoio::readLine(p.r), "partial line");
+    EXPECT_EQ(protoio::readBufferedLine(p.r), std::nullopt);  // "last" has no LF
+    EXPECT_EQ(protoio::readLine(p.r), "last");
+    EXPECT_EQ(protoio::readBufferedLine(p.r), std::nullopt);
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+}
+
+TEST(Stream, ReadBufferedLineDoesNotWaitForABlockedReader) {
+    Pipe p;
+    std::optional<std::string> got;
+    std::thread reader([&] { got = protoio::readLine(p.r); });  // blocks holding the read lock
+    std::this_thread::sleep_for(100ms);
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_EQ(protoio::readBufferedLine(p.r), std::nullopt);
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 1s);
+    protoio::write(p.w, "wake\n");
+    reader.join();
+    EXPECT_EQ(got, "wake");
+}
+
+TEST(Stream, ReadBufferedLineAndReadLineMixedReadEveryLineOnce) {
+    Pipe p;
+    constexpr int kLines = 50000;
+    std::thread writer([&] {
+        std::string chunk;
+        for (int i = 0; i < kLines; ++i) {
+            chunk += std::to_string(i) + std::string(i % 101, '.') + "\n";
+            if (chunk.size() > 7001) { protoio::write(p.w, chunk); chunk.clear(); }
+        }
+        protoio::write(p.w, chunk);
+        p.closeWriter();
+    });
+    int buffered = 0;
+    for (int i = 0; i < kLines; ++i) {
+        std::optional<std::string> line = protoio::readBufferedLine(p.r);
+        if (line) ++buffered;
+        else line = protoio::readLine(p.r);
+        ASSERT_EQ(line, std::to_string(i) + std::string(i % 101, '.')) << "line " << i;
+    }
+    EXPECT_EQ(protoio::readLine(p.r), std::nullopt);
+    EXPECT_GT(buffered, kLines / 2);  // most lines come from the buffer
+    writer.join();
+}
+
 TEST(Stream, ConcurrentReadersGetEachLineExactlyOnceAndWhole) {
     Pipe p;
     constexpr int kLines = 20000;
