@@ -1,0 +1,1178 @@
+[
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "00"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "01"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "85",
+  "bytes": "55"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "127",
+  "bytes": "7f"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "128",
+  "bytes": "80"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "165",
+  "bytes": "a5"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": false,
+  "value": "255",
+  "bytes": "ff"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "-128",
+  "bytes": "80"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "-127",
+  "bytes": "81"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "-2",
+  "bytes": "fe"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "-1",
+  "bytes": "ff"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "00"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "01"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "126",
+  "bytes": "7e"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": false,
+  "value": "127",
+  "bytes": "7f"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "00"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "01"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "85",
+  "bytes": "55"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "127",
+  "bytes": "7f"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "128",
+  "bytes": "80"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "165",
+  "bytes": "a5"
+ },
+ {
+  "kind": "u",
+  "width": 1,
+  "big_endian": true,
+  "value": "255",
+  "bytes": "ff"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "-128",
+  "bytes": "80"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "-127",
+  "bytes": "81"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "-2",
+  "bytes": "fe"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "-1",
+  "bytes": "ff"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "00"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "01"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "126",
+  "bytes": "7e"
+ },
+ {
+  "kind": "i",
+  "width": 1,
+  "big_endian": true,
+  "value": "127",
+  "bytes": "7f"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "0000"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "0100"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "127",
+  "bytes": "7f00"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "4660",
+  "bytes": "3412"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "32767",
+  "bytes": "ff7f"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "32768",
+  "bytes": "0080"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": false,
+  "value": "65535",
+  "bytes": "ffff"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "-32768",
+  "bytes": "0080"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "-32767",
+  "bytes": "0180"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "-2",
+  "bytes": "feff"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "-1",
+  "bytes": "ffff"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "0000"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "0100"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "32766",
+  "bytes": "fe7f"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": false,
+  "value": "32767",
+  "bytes": "ff7f"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "0000"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "0001"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "127",
+  "bytes": "007f"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "4660",
+  "bytes": "1234"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "32767",
+  "bytes": "7fff"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "32768",
+  "bytes": "8000"
+ },
+ {
+  "kind": "u",
+  "width": 2,
+  "big_endian": true,
+  "value": "65535",
+  "bytes": "ffff"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "-32768",
+  "bytes": "8000"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "-32767",
+  "bytes": "8001"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "-2",
+  "bytes": "fffe"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "-1",
+  "bytes": "ffff"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "0000"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "0001"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "32766",
+  "bytes": "7ffe"
+ },
+ {
+  "kind": "i",
+  "width": 2,
+  "big_endian": true,
+  "value": "32767",
+  "bytes": "7fff"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "01000000"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "127",
+  "bytes": "7f000000"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "305419896",
+  "bytes": "78563412"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "2147483647",
+  "bytes": "ffffff7f"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "2147483648",
+  "bytes": "00000080"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": false,
+  "value": "4294967295",
+  "bytes": "ffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "-2147483648",
+  "bytes": "00000080"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "-2147483647",
+  "bytes": "01000080"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "-2",
+  "bytes": "feffffff"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "-1",
+  "bytes": "ffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "01000000"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "2147483646",
+  "bytes": "feffff7f"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": false,
+  "value": "2147483647",
+  "bytes": "ffffff7f"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "00000001"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "127",
+  "bytes": "0000007f"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "305419896",
+  "bytes": "12345678"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "2147483647",
+  "bytes": "7fffffff"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "2147483648",
+  "bytes": "80000000"
+ },
+ {
+  "kind": "u",
+  "width": 4,
+  "big_endian": true,
+  "value": "4294967295",
+  "bytes": "ffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "-2147483648",
+  "bytes": "80000000"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "-2147483647",
+  "bytes": "80000001"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "-2",
+  "bytes": "fffffffe"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "-1",
+  "bytes": "ffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "00000001"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "2147483646",
+  "bytes": "7ffffffe"
+ },
+ {
+  "kind": "i",
+  "width": 4,
+  "big_endian": true,
+  "value": "2147483647",
+  "bytes": "7fffffff"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "0100000000000000"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "127",
+  "bytes": "7f00000000000000"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "81985529216486895",
+  "bytes": "efcdab8967452301"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "9223372036854775807",
+  "bytes": "ffffffffffffff7f"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "9223372036854775808",
+  "bytes": "0000000000000080"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": false,
+  "value": "18446744073709551615",
+  "bytes": "ffffffffffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "-9223372036854775808",
+  "bytes": "0000000000000080"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "-9223372036854775807",
+  "bytes": "0100000000000080"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "-2",
+  "bytes": "feffffffffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "-1",
+  "bytes": "ffffffffffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "0",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "1",
+  "bytes": "0100000000000000"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "9223372036854775806",
+  "bytes": "feffffffffffff7f"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": false,
+  "value": "9223372036854775807",
+  "bytes": "ffffffffffffff7f"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "0000000000000001"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "127",
+  "bytes": "000000000000007f"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "81985529216486895",
+  "bytes": "0123456789abcdef"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "9223372036854775807",
+  "bytes": "7fffffffffffffff"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "9223372036854775808",
+  "bytes": "8000000000000000"
+ },
+ {
+  "kind": "u",
+  "width": 8,
+  "big_endian": true,
+  "value": "18446744073709551615",
+  "bytes": "ffffffffffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "-9223372036854775808",
+  "bytes": "8000000000000000"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "-9223372036854775807",
+  "bytes": "8000000000000001"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "-2",
+  "bytes": "fffffffffffffffe"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "-1",
+  "bytes": "ffffffffffffffff"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "0",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "1",
+  "bytes": "0000000000000001"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "9223372036854775806",
+  "bytes": "7ffffffffffffffe"
+ },
+ {
+  "kind": "i",
+  "width": 8,
+  "big_endian": true,
+  "value": "9223372036854775807",
+  "bytes": "7fffffffffffffff"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "00000000",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "80000000",
+  "bytes": "00000080"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "3f800000",
+  "bytes": "0000803f"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "bfc00000",
+  "bytes": "0000c0bf"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "3dcccccd",
+  "bytes": "cdcccc3d"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "7f800000",
+  "bytes": "0000807f"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "ff800000",
+  "bytes": "000080ff"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "00000001",
+  "bytes": "01000000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "00800000",
+  "bytes": "00008000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "7f7fffff",
+  "bytes": "ffff7f7f"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "7fc00000",
+  "bytes": "0000c07f"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": false,
+  "value": "7fc00123",
+  "bytes": "2301c07f"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "0000000000000000",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "8000000000000000",
+  "bytes": "0000000000000080"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "3ff0000000000000",
+  "bytes": "000000000000f03f"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "bff8000000000000",
+  "bytes": "000000000000f8bf"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "400921fb54442d18",
+  "bytes": "182d4454fb210940"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "7ff0000000000000",
+  "bytes": "000000000000f07f"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "fff0000000000000",
+  "bytes": "000000000000f0ff"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "0000000000000001",
+  "bytes": "0100000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "0010000000000000",
+  "bytes": "0000000000001000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "7fefffffffffffff",
+  "bytes": "ffffffffffffef7f"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "7ff8000000000000",
+  "bytes": "000000000000f87f"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": false,
+  "value": "7ff8000000000123",
+  "bytes": "230100000000f87f"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "00000000",
+  "bytes": "00000000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "80000000",
+  "bytes": "80000000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "3f800000",
+  "bytes": "3f800000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "bfc00000",
+  "bytes": "bfc00000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "3dcccccd",
+  "bytes": "3dcccccd"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "7f800000",
+  "bytes": "7f800000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "ff800000",
+  "bytes": "ff800000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "00000001",
+  "bytes": "00000001"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "00800000",
+  "bytes": "00800000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "7f7fffff",
+  "bytes": "7f7fffff"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "7fc00000",
+  "bytes": "7fc00000"
+ },
+ {
+  "kind": "f32",
+  "width": 4,
+  "big_endian": true,
+  "value": "7fc00123",
+  "bytes": "7fc00123"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "0000000000000000",
+  "bytes": "0000000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "8000000000000000",
+  "bytes": "8000000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "3ff0000000000000",
+  "bytes": "3ff0000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "bff8000000000000",
+  "bytes": "bff8000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "400921fb54442d18",
+  "bytes": "400921fb54442d18"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "7ff0000000000000",
+  "bytes": "7ff0000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "fff0000000000000",
+  "bytes": "fff0000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "0000000000000001",
+  "bytes": "0000000000000001"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "0010000000000000",
+  "bytes": "0010000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "7fefffffffffffff",
+  "bytes": "7fefffffffffffff"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "7ff8000000000000",
+  "bytes": "7ff8000000000000"
+ },
+ {
+  "kind": "f64",
+  "width": 8,
+  "big_endian": true,
+  "value": "7ff8000000000123",
+  "bytes": "7ff8000000000123"
+ }
+]
