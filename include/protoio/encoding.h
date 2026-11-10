@@ -30,7 +30,10 @@ float getFloat32(std::string_view data, size_t offset, bool bigEndian);
 
 // RFC 4648, standard alphabet, padded, no line breaks.
 std::string base64Encode(std::string_view data);
-// Strict: padding required, no whitespace, no stray characters.
+// Strict: padding required, no whitespace, no stray characters. It departs
+// from CPython's b64decode in one more way: text whose last character carries
+// non-zero bits that the padding drops ("ab==", "abd=") is not canonical and
+// throws InvalidArgument, where CPython ignores those bits.
 std::string base64Decode(std::string_view text);
 
 } // namespace protoio::encoding

@@ -94,6 +94,16 @@ TEST(Base64Decode, RejectsBadInput) {
     expectInvalid([] { base64Decode("ab\n="); });
 }
 
+// A deliberate departure from CPython (ruling R7): text whose padding hides
+// non-zero bits is not canonical and is refused, where b64decode accepts it.
+TEST(Base64Decode, RejectsNonCanonicalTrailingBits) {
+    expectInvalid([] { base64Decode("ab=="); });  // CPython: b'i'
+    expectInvalid([] { base64Decode("abd="); });  // CPython: b'i\xb7'
+    // "abc=" is canonical ('c' leaves its two low bits zero) and decodes as CPython does.
+    EXPECT_EQ(base64Decode("abc="), "i\xb7");
+    EXPECT_EQ(base64Decode("aQ=="), "i");
+}
+
 TEST(Json, ReaderBasics) {
     auto v = protoio_test::parseJson(
         R"({"a":[1,-2,3.5e2,true,false,null],"s":"q\"\\\/\b\f\n\r\té😀","big":"18446744073709551615","n":9007199254740993})");
