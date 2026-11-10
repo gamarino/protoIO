@@ -15,6 +15,7 @@
 #include <mutex>
 #include <system_error>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <io.h>
@@ -62,7 +63,34 @@ SOCKET socketOf(int fd) {
     return it == g_socks.end() ? INVALID_SOCKET : it->second;
 }
 
+// --------------------------------------------------- append descriptors
+
+namespace {
+
+std::mutex g_appendMutex;
+std::unordered_set<int> g_appendFds;  // guarded by g_appendMutex
+
+} // namespace
+
+void markAppend(int fd) {
+    std::lock_guard<std::mutex> lock(g_appendMutex);
+    g_appendFds.insert(fd);
+}
+
+bool isAppend(int fd) {
+    std::lock_guard<std::mutex> lock(g_appendMutex);
+    return g_appendFds.count(fd) != 0;
+}
+
+void unmarkAppend(int fd) {
+    std::lock_guard<std::mutex> lock(g_appendMutex);
+    g_appendFds.erase(fd);
+}
+
 void closeDescriptor(int fd) {
+    // Before the number is released: a descriptor opened right after the
+    // close may get it, and must not inherit the mark.
+    unmarkAppend(fd);
     SOCKET s = INVALID_SOCKET;
     if (fd >= kSocketBase) {
         std::lock_guard<std::mutex> lock(g_sockMutex);

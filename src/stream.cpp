@@ -661,6 +661,9 @@ void setTimeout(int fd, int ms) {
 }
 
 void forget(int fd) {
+#ifdef _WIN32
+    detail::win::unmarkAppend(fd);
+#endif
     std::lock_guard<std::mutex> lock(detail::g_fdMutex);
     detail::g_fds.erase(fd);
 }

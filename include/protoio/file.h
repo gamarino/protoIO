@@ -80,8 +80,9 @@ void chdir(const std::string& path);
 // The storage ground of the protoCore runtimes' databases (a port of
 // ProtoBase shares ProtoBase's on-disk directory with it). Failures throw as
 // above, with `sysErrno` set; an interrupted call (EINTR) is retried, and a
-// short read or write is continued. A negative offset or size throws
-// InvalidArgument. On Windows readAt and writeAt move the descriptor's file
+// short read or write is continued, and a write that makes no progress
+// throws FileSystem (EIO) instead of looping. A negative offset or size
+// throws InvalidArgument. On Windows readAt and writeAt move the descriptor's file
 // position, so they do not mix with the stream functions on one descriptor.
 
 // The flags of open(2) that Mode cannot express.
@@ -98,19 +99,26 @@ struct OpenOptions {
 int open(const std::string& path, const OpenOptions& options);
 
 // Up to `n` bytes at `offset` (pread); fewer only at the end of the file, and
-// none from the end on.
+// none from the end on. For a regular file, `n` is first capped at what the
+// file holds from `offset` on, so a huge (corrupt) count allocates no more
+// than the file's bytes.
 std::string readAt(int fd, std::int64_t offset, std::size_t n);
 
-// Writes all of `data` at `offset` (pwrite), extending the file as needed.
+// Writes all of `data` at `offset` (pwrite), extending the file as needed. A
+// descriptor opened with `append` (OpenOptions::append or Mode::Append)
+// throws InvalidArgument on every platform: Linux would append and ignore
+// the offset. On Windows protoIO recognizes only append descriptors it
+// opened itself.
 void writeAt(int fd, std::int64_t offset, std::string_view data);
 
 // Writes all of `data` at the end of a descriptor opened with `append`, and
 // answers the offset where it starts. Contract: ONE APPENDER PER DESCRIPTOR
 // at a time. The offset is the end of the file just before the write, and
-// neither POSIX nor the Windows C runtime (whose append is a seek and a
-// write) says atomically where an append landed, so concurrent appenders on
-// one descriptor, or other processes appending to the same file, are not
-// supported. Concurrent readAt calls are.
+// neither POSIX nor Windows says atomically where an append landed, so
+// concurrent appenders on one descriptor, or other processes appending to
+// the same file, are not supported. Concurrent readAt calls are (on Windows
+// the append is a positioned write at that offset, independent of the file
+// pointer that readAt moves).
 std::int64_t appendData(int fd, std::string_view data);
 
 // The size of the file, in bytes (fstat; GetFileSizeEx).

@@ -71,6 +71,15 @@ SOCKET socketOf(int fd);
 // a socket, _close for anything else.
 void closeDescriptor(int fd);
 
+// The descriptors protoIO opened with append (file::open with Mode::Append
+// or OpenOptions::append). The C runtime does not expose _O_APPEND, and
+// file::writeAt must refuse such a descriptor, as on POSIX. A mark is set by
+// the open that creates the descriptor and dropped by closeDescriptor
+// (before the number is released) and by protoio::forget. Thread-safe.
+void markAppend(int fd);
+bool isAppend(int fd);
+void unmarkAppend(int fd);
+
 // Switches a socket between blocking and non-blocking (FIONBIO).
 void setNonBlocking(SOCKET s, bool on);
 

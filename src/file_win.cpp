@@ -110,6 +110,7 @@ void writeWhole(const std::string& path, const std::string& data, bool append) {
     while (done < data.size()) {
         const int w = ::_write(fd, data.data() + done, static_cast<unsigned>(std::min<std::size_t>(data.size() - done, INT_MAX)));
         if (w < 0) { const int e = errno; ::_close(fd); fileError(path, e, "cannot write"); }
+        if (w == 0) { ::_close(fd); fileError(path, EIO, "cannot write"); }  // no progress
         done += static_cast<std::size_t>(w);
     }
     if (::_close(fd) != 0) fileError(path, errno, "cannot write");
@@ -148,6 +149,21 @@ OVERLAPPED at(std::int64_t offset) {
     return ov;
 }
 
+// Writes all of `data` at `offset` with positioned WriteFile calls, which do
+// not depend on the file pointer. A call that reports no progress for a
+// non-zero request throws FileSystem (EIO) rather than looping forever.
+void writeAllAt(HANDLE h, int fd, std::int64_t offset, std::string_view data, const char* action) {
+    std::size_t done = 0;
+    while (done < data.size()) {
+        OVERLAPPED ov = at(offset + static_cast<std::int64_t>(done));
+        DWORD put = 0;
+        if (!::WriteFile(h, data.data() + done, static_cast<DWORD>(std::min(data.size() - done, kMaxChunk)), &put, &ov))
+            fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), action);
+        if (put == 0) fileError(fdName(fd), EIO, action);
+        done += put;
+    }
+}
+
 } // namespace
 
 int open(const std::string& path, Mode mode) {
@@ -161,6 +177,7 @@ int open(const std::string& path, Mode mode) {
     const int fd = openPath(path, flags);
     if (fd < 0) fileError(path, errno, "cannot open");
     protoio::forget(fd);  // a stale state for a reused number must not survive
+    if (mode == Mode::Append) win::markAppend(fd);  // writeAt refuses it
     return fd;
 }
 
@@ -342,12 +359,22 @@ int open(const std::string& path, const OpenOptions& options) {
     const int fd = openPath(path, flags);
     if (fd < 0) fileError(path, errno, "cannot open");
     protoio::forget(fd);  // a stale state for a reused number must not survive
+    if (options.append) win::markAppend(fd);  // writeAt refuses it
     return fd;
 }
 
 std::string readAt(int fd, std::int64_t offset, std::size_t n) {
     checkOffset(offset, "cannot read at");
     const HANDLE h = handleOf(fd, "cannot read");
+    // Allocate no more than a disk file holds from `offset` on, so a corrupt
+    // length is neither zero-filled nor a std::length_error; fewer bytes are
+    // answered, as at any end of the file.
+    if (::GetFileType(h) == FILE_TYPE_DISK) {
+        LARGE_INTEGER sz{};
+        if (!::GetFileSizeEx(h, &sz)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot read");
+        const std::int64_t left = std::max<std::int64_t>(0, static_cast<std::int64_t>(sz.QuadPart) - offset);
+        n = std::min(n, static_cast<std::size_t>(left));
+    }
     std::string out(n, '\0');
     std::size_t done = 0;
     while (done < n) {
@@ -368,32 +395,23 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n) {
 void writeAt(int fd, std::int64_t offset, std::string_view data) {
     checkOffset(offset, "cannot write at");
     const HANDLE h = handleOf(fd, "cannot write");
-    std::size_t done = 0;
-    while (done < data.size()) {
-        OVERLAPPED ov = at(offset + static_cast<std::int64_t>(done));
-        DWORD put = 0;
-        if (!::WriteFile(h, data.data() + done, static_cast<DWORD>(std::min(data.size() - done, kMaxChunk)), &put, &ov))
-            fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot write");
-        done += put;
-    }
+    // As on POSIX, where an O_APPEND descriptor cannot write at an offset.
+    if (win::isAppend(fd)) invalid("cannot write at an offset of " + fdName(fd) + ": it was opened to append");
+    writeAllAt(h, fd, offset, data, "cannot write");
 }
 
 std::int64_t appendData(int fd, std::string_view data) {
     // Valid under the one-appender contract: nobody else moves the end
-    // between this answer and the write. The C runtime's _O_APPEND seeks to
-    // the end before each _write, which is where this write lands.
-    std::int64_t start;
-    {
-        win::QuietCrt quiet;
-        start = ::_lseeki64(fd, 0, SEEK_END);
-    }
-    if (start < 0) fileError(fdName(fd), errno, "cannot append to");
-    std::size_t done = 0;
-    while (done < data.size()) {
-        const int w = ::_write(fd, data.data() + done, static_cast<unsigned>(std::min(data.size() - done, kMaxChunk)));
-        if (w < 0) fileError(fdName(fd), errno, "cannot append to");
-        done += static_cast<std::size_t>(w);
-    }
+    // between this answer and the write. The write names its offset
+    // (OVERLAPPED) and never uses the file pointer: a positioned read on
+    // another thread moves that pointer, so the C runtime's append (a seek to
+    // the end, then a write at the pointer) could land in the middle of the
+    // file.
+    const HANDLE h = handleOf(fd, "cannot append to");
+    LARGE_INTEGER end{};
+    if (!::GetFileSizeEx(h, &end)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot append to");
+    const std::int64_t start = static_cast<std::int64_t>(end.QuadPart);
+    writeAllAt(h, fd, start, data, "cannot append to");
     return start;
 }
 
@@ -435,7 +453,9 @@ bool tryLock(int fd) {
     OVERLAPPED ov = at(0);
     if (::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return true;
     const DWORD e = ::GetLastError();
-    if (e == ERROR_LOCK_VIOLATION) return false;
+    // ERROR_IO_PENDING cannot happen on a synchronous handle with
+    // LOCKFILE_FAIL_IMMEDIATELY; it is read as "held", defensively.
+    if (e == ERROR_LOCK_VIOLATION || e == ERROR_IO_PENDING) return false;
     fileError(fdName(fd), win::errnoOfWin32(e), "cannot lock");
 }
 

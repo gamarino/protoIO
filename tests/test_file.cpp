@@ -1,4 +1,5 @@
 // Files and directories against a temporary directory.
+#include "protoio/digest.h"
 #include "protoio/error.h"
 #include "protoio/file.h"
 #include "protoio/stream.h"
@@ -8,10 +9,15 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <random>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <algorithm>
@@ -326,6 +332,155 @@ TEST(File, AppendData_AnswersStartOffset) {
     EXPECT_EQ(file::appendData(fd, "first"), 0);
     EXPECT_EQ(file::appendData(fd, "second"), 5);
     EXPECT_EQ(file::readAt(fd, 0, 100), "firstsecond");
+    protoio::close(fd);
+}
+
+// writeAt names an offset, which an append descriptor cannot honour (Linux's
+// pwrite ignores it under O_APPEND and appends): it is refused everywhere.
+TEST(File, WriteAt_OnAppendDescriptor_Throws) {
+    TempDir d;
+    const int fd = file::open(d / "log", file::OpenOptions{.read = true, .write = true, .create = true, .append = true});
+    file::appendData(fd, "0123456789");
+    EXPECT_EQ(kindOf([&] { file::writeAt(fd, 2, "xy"); }), Error::Kind::InvalidArgument);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "0123456789");
+    protoio::close(fd);
+    const int m = file::open(d / "log", file::Mode::Append);
+    EXPECT_EQ(kindOf([&] { file::writeAt(m, 0, "z"); }), Error::Kind::InvalidArgument);
+    protoio::close(m);
+    // The same number reopened without append writes at the offset again.
+    const int rw = file::open(d / "log", readWriteCreate());
+    file::writeAt(rw, 2, "xy");
+    EXPECT_EQ(file::readAt(rw, 0, 100), "01xy456789");
+    protoio::close(rw);
+}
+
+// A corrupt length must not allocate (or throw std::length_error): the
+// answer is capped by what the file holds.
+TEST(File, ReadAt_HugeCount_AnswersFileBytes) {
+    TempDir d;
+    file::write(d / "small", "0123456789");
+    const int fd = file::open(d / "small", file::OpenOptions{.read = true});
+    std::string got;
+    EXPECT_NO_THROW(got = file::readAt(fd, 0, std::numeric_limits<std::size_t>::max() / 2));
+    EXPECT_EQ(got, "0123456789");
+    EXPECT_EQ(file::readAt(fd, 4, std::numeric_limits<std::size_t>::max()), "456789");
+    EXPECT_EQ(file::readAt(fd, 100, std::numeric_limits<std::size_t>::max()), "");
+    protoio::close(fd);
+}
+
+// A write that reports 0 bytes for a non-zero request (which no regular file
+// does on demand, so it cannot be provoked portably here) throws FileSystem
+// with sysErrno EIO instead of looping, as ProtoBase's _write_all does.
+
+// The ProtoBase storage pattern: ONE appender and concurrent readers on one
+// descriptor. Each record describes itself (its offset, its length and the
+// CRC32 of its payload); readers check published records and read at random
+// offsets while the appender runs. On Windows a positioned read moves the
+// file pointer, so an append that relied on it could land mid-file.
+TEST(File, AppendData_OneAppenderConcurrentReaders) {
+    constexpr int kRecords = 2000;
+    constexpr int kReaders = 4;
+    constexpr std::size_t kHeader = 16;  // offset u64, payload length u32, crc32 u32
+    TempDir d;
+    const int fd = file::open(d / "segment", file::OpenOptions{.read = true, .write = true, .create = true, .append = true});
+
+    auto put = [](std::string& s, std::uint64_t v, int bytes) {
+        for (int i = 0; i < bytes; ++i) s.push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+    };
+    auto get = [](const std::string& s, std::size_t at, int bytes) {
+        std::uint64_t v = 0;
+        for (int i = 0; i < bytes; ++i) v |= static_cast<std::uint64_t>(static_cast<unsigned char>(s[at + i])) << (8 * i);
+        return v;
+    };
+    // An empty string when the record at `offset` verifies, else what is wrong.
+    auto verify = [&](std::int64_t offset) -> std::string {
+        const std::string head = file::readAt(fd, offset, kHeader);
+        if (head.size() != kHeader) return "short header at " + std::to_string(offset);
+        if (static_cast<std::int64_t>(get(head, 0, 8)) != offset)
+            return "record at " + std::to_string(offset) + " names offset " + std::to_string(get(head, 0, 8));
+        const std::size_t len = static_cast<std::size_t>(get(head, 8, 4));
+        const std::string payload = file::readAt(fd, offset + static_cast<std::int64_t>(kHeader), len);
+        if (payload.size() != len) return "short payload at " + std::to_string(offset);
+        if (protoio::digest::crc32(payload) != static_cast<std::uint32_t>(get(head, 12, 4)))
+            return "bad crc at " + std::to_string(offset);
+        return {};
+    };
+
+    std::vector<std::int64_t> offsets(kRecords, -1);
+    std::atomic<int> published{0};
+    std::atomic<bool> done{false};
+    std::atomic<int> readerFailures{0};
+    std::vector<std::string> readerErrors(kReaders);
+
+    std::vector<std::thread> readers;
+    for (int r = 0; r < kReaders; ++r) {
+        readers.emplace_back([&, r] {
+            std::mt19937_64 rng(static_cast<std::uint64_t>(r) * 7919 + 1);
+            try {
+                while (!done.load(std::memory_order_acquire)) {
+                    const std::int64_t sz = file::size(fd);
+                    if (sz > 0) {
+                        // A read at a random offset (moves the Windows file pointer).
+                        (void)file::readAt(fd, static_cast<std::int64_t>(rng() % static_cast<std::uint64_t>(sz)), 1 + rng() % 512);
+                    }
+                    const int n = published.load(std::memory_order_acquire);
+                    if (n > 0) {
+                        const std::string err = verify(offsets[static_cast<std::size_t>(rng() % static_cast<std::uint64_t>(n))]);
+                        if (!err.empty()) {
+                            readerErrors[static_cast<std::size_t>(r)] = err;
+                            readerFailures.fetch_add(1);
+                            return;
+                        }
+                    }
+                }
+            } catch (const Error& e) {
+                readerErrors[static_cast<std::size_t>(r)] = e.what();
+                readerFailures.fetch_add(1);
+            }
+        });
+    }
+
+    std::mt19937_64 rng(42);
+    std::int64_t expected = 0;
+    std::string appendError;
+    try {
+        for (int i = 0; i < kRecords; ++i) {
+            std::string payload(1 + rng() % 2000, '\0');
+            for (char& c : payload) c = static_cast<char>(rng() & 0xff);
+            std::string rec;
+            put(rec, static_cast<std::uint64_t>(expected), 8);  // the offset it must land at
+            put(rec, payload.size(), 4);
+            put(rec, protoio::digest::crc32(payload), 4);
+            rec += payload;
+            const std::int64_t at = file::appendData(fd, rec);
+            if (at != expected) {
+                appendError = "record " + std::to_string(i) + " answered " + std::to_string(at) + ", expected " +
+                              std::to_string(expected);
+                break;
+            }
+            offsets[static_cast<std::size_t>(i)] = at;
+            published.store(i + 1, std::memory_order_release);
+            expected += static_cast<std::int64_t>(rec.size());
+        }
+    } catch (const Error& e) {
+        appendError = e.what();
+    }
+    done.store(true, std::memory_order_release);
+    for (auto& t : readers) t.join();
+
+    EXPECT_EQ(appendError, "");
+    for (int r = 0; r < kReaders; ++r) EXPECT_EQ(readerErrors[static_cast<std::size_t>(r)], "") << "reader " << r;
+    EXPECT_EQ(readerFailures.load(), 0);
+    EXPECT_EQ(file::size(fd), expected);
+    const int n = published.load();
+    EXPECT_EQ(n, kRecords);
+    for (int i = 0; i < n; ++i) {
+        const std::string err = verify(offsets[static_cast<std::size_t>(i)]);
+        if (!err.empty()) {
+            ADD_FAILURE() << "record " << i << ": " << err;
+            break;
+        }
+    }
     protoio::close(fd);
 }
 

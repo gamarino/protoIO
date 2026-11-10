@@ -37,6 +37,7 @@ void writeWhole(const std::string& path, const std::string& data, bool append) {
         const ssize_t w = ::write(fd, data.data() + done, data.size() - done);
         if (w < 0 && errno == EINTR) continue;
         if (w < 0) { const int e = errno; ::close(fd); fileError(path, e, "cannot write"); }
+        if (w == 0) { ::close(fd); fileError(path, EIO, "cannot write"); }  // no progress
         done += static_cast<std::size_t>(w);
     }
     if (::close(fd) != 0 && errno != EINTR) fileError(path, errno, "cannot write");
@@ -212,6 +213,15 @@ int open(const std::string& path, const OpenOptions& options) {
 
 std::string readAt(int fd, std::int64_t offset, std::size_t n) {
     checkOffset(offset, "cannot read at");
+    // Allocate no more than a regular file holds from `offset` on, so a
+    // corrupt length is neither zero-filled nor a std::length_error; fewer
+    // bytes are answered, as at any end of the file.
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot read");
+    if (S_ISREG(st.st_mode)) {
+        const std::int64_t left = std::max<std::int64_t>(0, static_cast<std::int64_t>(st.st_size) - offset);
+        n = std::min(n, static_cast<std::size_t>(left));
+    }
     std::string out(n, '\0');
     std::size_t done = 0;
     while (done < n) {
@@ -228,12 +238,18 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n) {
 
 void writeAt(int fd, std::int64_t offset, std::string_view data) {
     checkOffset(offset, "cannot write at");
+    // pwrite ignores the offset of an O_APPEND descriptor on Linux (and
+    // appends), but honours it elsewhere: refused on every platform.
+    const int fl = ::fcntl(fd, F_GETFL);
+    if (fl < 0) fileError(fdName(fd), errno, "cannot write");
+    if (fl & O_APPEND) invalid("cannot write at an offset of " + fdName(fd) + ": it was opened to append");
     std::size_t done = 0;
     while (done < data.size()) {
         const ssize_t w = ::pwrite(fd, data.data() + done, std::min(data.size() - done, kMaxChunk),
                                    static_cast<off_t>(offset + static_cast<std::int64_t>(done)));
         if (w < 0 && errno == EINTR) continue;
         if (w < 0) fileError(fdName(fd), errno, "cannot write");
+        if (w == 0) fileError(fdName(fd), EIO, "cannot write");  // no progress: never loop forever
         done += static_cast<std::size_t>(w);
     }
 }
@@ -248,6 +264,7 @@ std::int64_t appendData(int fd, std::string_view data) {
         const ssize_t w = ::write(fd, data.data() + done, std::min(data.size() - done, kMaxChunk));
         if (w < 0 && errno == EINTR) continue;
         if (w < 0) fileError(fdName(fd), errno, "cannot append to");
+        if (w == 0) fileError(fdName(fd), EIO, "cannot append to");  // no progress: never loop forever
         done += static_cast<std::size_t>(w);
     }
     return static_cast<std::int64_t>(start);
