@@ -111,14 +111,20 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n);
 // opened itself.
 void writeAt(int fd, std::int64_t offset, std::string_view data);
 
-// Writes all of `data` at the end of a descriptor opened with `append`, and
-// answers the offset where it starts. Contract: ONE APPENDER PER DESCRIPTOR
-// at a time. The offset is the end of the file just before the write, and
-// neither POSIX nor Windows says atomically where an append landed, so
-// concurrent appenders on one descriptor, or other processes appending to
-// the same file, are not supported. Concurrent readAt calls are (on Windows
-// the append is a positioned write at that offset, independent of the file
-// pointer that readAt moves).
+// Writes all of `data` at the end of a writable descriptor and answers the
+// offset where it starts. The descriptor may be opened with `append` or not:
+// appendData reads the end first (lseek(SEEK_END); GetFileSizeEx) and writes
+// there. Concurrent readAt and writeAt calls are positioned and do not use
+// the file pointer.
+//
+// Contract: ONE APPENDER PER DESCRIPTOR at a time, and nothing else may move
+// the end of the file during the call (a writeAt past the end, a truncate).
+// The offset is the end of the file just before the write, and neither POSIX
+// nor Windows reports atomically where an append landed, so concurrent
+// appenders on one descriptor, or other processes appending to the same
+// file, are not supported. protoIO does not detect a violation; a runtime
+// that exposes appendData should (protoST's BinaryFile refuses such
+// concurrent calls with an Error).
 std::int64_t appendData(int fd, std::string_view data);
 
 // The size of the file, in bytes (fstat; GetFileSizeEx).
