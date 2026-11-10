@@ -186,7 +186,9 @@ struct Response {
 // origin drops the caller's headers for the rest of the chain, and https to
 // http is refused. The request sends host, user-agent, accept and, with a
 // body, a text/plain content-type, each replaceable by the caller's headers.
-// Everything is validated before anything is sent. Blocks.
+// Everything is validated before anything is sent: a URL that holds a NUL
+// byte throws InvalidArgument (a redirect location that holds one, Network);
+// the body may hold NUL bytes. Blocks.
 Response httpRequest(const Request& request);
 
 } // namespace protoio::http

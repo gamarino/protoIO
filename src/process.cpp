@@ -62,6 +62,10 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
 }
 
 RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
+    // Every string below reaches the system as a C string; `input` is data.
+    detail::checkNoNulArgv(argv, "process::run");
+    if (options.directory) detail::checkNoNul(*options.directory, "process::run", "the working directory");
+    if (options.environment) detail::checkNoNulEnvironment(*options.environment, "process::run");
     std::vector<char*> args = argvOf(argv, "run");
     const std::optional<std::string>& input = options.input;
     // The child's environment: the caller's, or the one given. posix_spawnp
@@ -165,10 +169,12 @@ RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
 
 RunResult shell(const std::string& command, const std::optional<std::string>& input) {
     if (command.empty()) throw Error(Error::Kind::InvalidArgument, "shell: needs a command");
+    detail::checkNoNul(command, "process::shell", "the command");  // `input` is data
     return run({"/bin/sh", "-c", command}, input);
 }
 
 int spawn(const std::vector<std::string>& argv) {
+    detail::checkNoNulArgv(argv, "process::spawn");
     std::vector<char*> args = argvOf(argv, "spawn");
     pid_t pid;
     std::fflush(nullptr);
@@ -190,12 +196,15 @@ void kill(int pid, int signal) {
 }
 
 std::optional<std::string> getenv(const std::string& name) {
+    detail::checkNoNul(name, "process::getenv", "the name");
     const char* v = std::getenv(name.c_str());
     if (!v) return std::nullopt;
     return std::string(v);
 }
 
 void setenv(const std::string& name, const std::optional<std::string>& value) {
+    detail::checkNoNul(name, "process::setenv", "the name");
+    if (value) detail::checkNoNul(*value, "process::setenv", "the value");
     const int rc = value ? ::setenv(name.c_str(), value->c_str(), 1) : ::unsetenv(name.c_str());
     if (rc != 0) throw Error(Error::Kind::InvalidArgument, "invalid environment variable name: " + name, errno);
 }

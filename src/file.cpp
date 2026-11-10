@@ -21,6 +21,7 @@ namespace protoio::file {
 
 namespace fs = std::filesystem;
 using detail::fileError;
+using detail::checkNoNul;
 
 namespace {
 
@@ -59,6 +60,7 @@ constexpr std::size_t kMaxChunk = 1u << 30;
 } // namespace
 
 int open(const std::string& path, Mode mode) {
+    checkNoNul(path, "file::open", "the path");
     int flags = O_CLOEXEC;
     switch (mode) {
         case Mode::Read: flags |= O_RDONLY; break;
@@ -73,6 +75,7 @@ int open(const std::string& path, Mode mode) {
 }
 
 std::string read(const std::string& path) {
+    checkNoNul(path, "file::read", "the path");
     const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) fileError(path, errno, "cannot read");
     struct stat st{};
@@ -90,11 +93,18 @@ std::string read(const std::string& path) {
     return out;
 }
 
-void write(const std::string& path, const std::string& data) { writeWhole(path, data, false); }
+void write(const std::string& path, const std::string& data) {
+    checkNoNul(path, "file::write", "the path");  // `data` may hold NUL bytes
+    writeWhole(path, data, false);
+}
 
-void append(const std::string& path, const std::string& data) { writeWhole(path, data, true); }
+void append(const std::string& path, const std::string& data) {
+    checkNoNul(path, "file::append", "the path");  // `data` may hold NUL bytes
+    writeWhole(path, data, true);
+}
 
 std::optional<Stat> stat(const std::string& path) {
+    checkNoNul(path, "file::stat", "the path");
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return std::nullopt;
     Stat s;
@@ -112,6 +122,7 @@ std::optional<Stat> stat(const std::string& path) {
 }
 
 bool remove(const std::string& path, bool recursive) {
+    checkNoNul(path, "file::remove", "the path");
     try {
         return recursive ? fs::remove_all(path) > 0 : fs::remove(path);
     } catch (const fs::filesystem_error& e) {
@@ -120,6 +131,8 @@ bool remove(const std::string& path, bool recursive) {
 }
 
 void move(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::move", "the source path");
+    checkNoNul(to, "file::move", "the target path");
     try {
         fs::rename(from, to);
     } catch (const fs::filesystem_error& e) {
@@ -128,6 +141,8 @@ void move(const std::string& from, const std::string& to) {
 }
 
 void copy(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::copy", "the source path");
+    checkNoNul(to, "file::copy", "the target path");
     try {
         fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
     } catch (const fs::filesystem_error& e) {
@@ -136,6 +151,7 @@ void copy(const std::string& from, const std::string& to) {
 }
 
 void mkdir(const std::string& path, bool parents) {
+    checkNoNul(path, "file::mkdir", "the path");
     int err = 0;
     if (parents) {
         std::error_code ec;
@@ -148,6 +164,7 @@ void mkdir(const std::string& path, bool parents) {
 }
 
 std::vector<std::string> list(const std::string& path) {
+    checkNoNul(path, "file::list", "the path");
     std::vector<std::string> names;
     try {
         for (const auto& e : fs::directory_iterator(path)) names.push_back(e.path().filename().string());
@@ -159,6 +176,7 @@ std::vector<std::string> list(const std::string& path) {
 }
 
 std::string absolute(const std::string& path) {
+    checkNoNul(path, "file::absolute", "the path");
     // Lexical only: "." and ".." are folded and symbolic links are kept, as
     // Pharo's fullName does.
     std::error_code ec;
@@ -188,12 +206,14 @@ std::string cwd() {
 }
 
 void chdir(const std::string& path) {
+    checkNoNul(path, "file::chdir", "the path");
     if (::chdir(path.c_str()) != 0) fileError(path, errno, "cannot change directory to");
 }
 
 // ------------------------------------------- positioned and durable operations
 
 int open(const std::string& path, const OpenOptions& options) {
+    checkNoNul(path, "file::open", "the path");
     const bool write = options.write || options.append;
     if (!options.read && !write) invalid("cannot open " + path + ": neither read nor write was asked for");
     if (options.exclusive && !options.create) invalid("cannot open " + path + ": exclusive needs create");
@@ -306,6 +326,7 @@ void dataSync(int fd) {
 }
 
 void syncDirectory(const std::string& path) {
+    checkNoNul(path, "file::syncDirectory", "the path");
     int fd;
     do fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     while (fd < 0 && errno == EINTR);
@@ -318,7 +339,11 @@ void syncDirectory(const std::string& path) {
     if (r != 0) fileError(path, e, "cannot sync directory");
 }
 
-void replace(const std::string& from, const std::string& to) { move(from, to); }
+void replace(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::replace", "the source path");
+    checkNoNul(to, "file::replace", "the target path");
+    move(from, to);
+}
 
 bool tryLock(int fd) {
     for (;;) {

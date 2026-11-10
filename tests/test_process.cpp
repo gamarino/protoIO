@@ -498,3 +498,78 @@ TEST(Process, Identity) {
 TEST(Process, ExitEndsTheProcessWithTheCode) {
     EXPECT_EXIT(process::exit(0x105), ::testing::ExitedWithCode(5), "");
 }
+
+// ------------------------------------------- NUL bytes in strings for the OS
+
+namespace {
+
+std::string withNul(const std::string& prefix) { return prefix + std::string("\0tail", 5); }
+
+template <typename F>
+void expectNulRefused(F f, const std::string& message) {
+    try {
+        f();
+        ADD_FAILURE() << "no Error was thrown; expected: " << message;
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::InvalidArgument) << e.what();
+        EXPECT_EQ(std::string(e.what()), message);
+    }
+}
+
+} // namespace
+
+// An argument, a working directory or an environment entry with a NUL byte
+// would reach the child cut at that byte: refused before anything runs.
+TEST(Process, NulInArguments_IsRefused) {
+    std::vector<std::string> argv = kTrue;
+    argv.push_back(withNul("x"));
+    const std::string last = "argument " + std::to_string(argv.size() - 1);
+    expectNulRefused([&] { process::run(argv); }, "process::run: " + last + " contains a NUL byte");
+    expectNulRefused([&] { process::spawn(argv); }, "process::spawn: " + last + " contains a NUL byte");
+    expectNulRefused([&] { process::run({withNul(kTrue[0])}); }, "process::run: argument 0 contains a NUL byte");
+    expectNulRefused([&] { process::shell(withNul("exit 0")); }, "process::shell: the command contains a NUL byte");
+
+    protoio_test::TempDir d;
+    process::RunOptions dir;
+    dir.directory = withNul(d.path);
+    expectNulRefused([&] { process::run(kTrue, dir); }, "process::run: the working directory contains a NUL byte");
+    process::RunOptions envName;
+    envName.environment = {{"A", "1"}, {withNul("B"), "2"}};
+    expectNulRefused([&] { process::run(kTrue, envName); },
+                     "process::run: the name of environment entry 1 contains a NUL byte");
+    process::RunOptions envValue;
+    envValue.environment = {{"A", withNul("1")}};
+    expectNulRefused([&] { process::run(kTrue, envValue); },
+                     "process::run: the value of environment entry 0 contains a NUL byte");
+}
+
+#ifndef _WIN32
+// Nothing ran: `touch` would have created the file the prefix names.
+TEST(Process, NulInArguments_RunsNothing) {
+    protoio_test::TempDir d;
+    const std::string pre = d / "pre";
+    expectNulRefused([&] { process::run({"touch", withNul(pre)}); }, "process::run: argument 1 contains a NUL byte");
+    expectNulRefused([&] { process::shell(withNul("touch " + pre)); }, "process::shell: the command contains a NUL byte");
+    process::RunOptions envValue;
+    envValue.environment = {{"F", withNul(pre)}};
+    expectNulRefused([&] { process::run({"/bin/sh", "-c", "touch \"$F\""}, envValue); },
+                     "process::run: the value of environment entry 0 contains a NUL byte");
+    EXPECT_FALSE(file::stat(pre).has_value());
+}
+#endif
+
+TEST(Process, NulInEnvironmentCalls_IsRefused) {
+    const std::string name = "PROTOIO_NUL_TEST";
+    process::setenv(name, std::nullopt);
+    expectNulRefused([&] { process::setenv(withNul(name), std::string("v")); },
+                     "process::setenv: the name contains a NUL byte");
+    expectNulRefused([&] { process::setenv(name, withNul("v")); }, "process::setenv: the value contains a NUL byte");
+    EXPECT_FALSE(process::getenv(name).has_value());  // neither set the prefix
+    expectNulRefused([&] { process::getenv(withNul(name)); }, "process::getenv: the name contains a NUL byte");
+}
+
+// Input is data: NUL bytes in it reach the child.
+TEST(Process, NulInInput_IsFed) {
+    const std::string data("a\0b\n", 4);
+    EXPECT_EQ(process::run(kCat, data).out, data);
+}

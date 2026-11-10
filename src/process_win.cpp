@@ -461,6 +461,10 @@ RunResult run(const std::vector<std::string>& argv, const std::optional<std::str
 
 RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
     if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "run: needs a command");
+    // Every string below reaches the system as a C string; `input` is data.
+    detail::checkNoNulArgv(argv, "process::run");
+    if (options.directory) detail::checkNoNul(*options.directory, "process::run", "the working directory");
+    if (options.environment) detail::checkNoNulEnvironment(*options.environment, "process::run");
     const std::wstring directory = options.directory ? childDirectory(argv[0], *options.directory) : std::wstring();
     std::vector<wchar_t> environment;
     if (options.environment) environment = environmentBlock(*options.environment);
@@ -471,6 +475,7 @@ RunResult run(const std::vector<std::string>& argv, const RunOptions& options) {
 
 RunResult shell(const std::string& command, const std::optional<std::string>& input) {
     if (command.empty()) throw Error(Error::Kind::InvalidArgument, "shell: needs a command");
+    detail::checkNoNul(command, "process::shell", "the command");  // `input` is data
     const std::wstring systemDir = sized([](wchar_t* b, DWORD n) { return ::GetSystemDirectoryW(b, n); });
     if (systemDir.empty()) lastError("cannot run cmd.exe");
     const std::wstring program = systemDir + L"\\cmd.exe";
@@ -481,6 +486,7 @@ RunResult shell(const std::string& command, const std::optional<std::string>& in
 
 int spawn(const std::vector<std::string>& argv) {
     if (argv.empty()) throw Error(Error::Kind::InvalidArgument, "spawn: needs a command");
+    detail::checkNoNulArgv(argv, "process::spawn");
     std::fflush(nullptr);
     // The child shares the caller's standard streams (start passes them
     // through inheritable duplicates).
@@ -542,6 +548,7 @@ void kill(int pid, int signal) {
 }
 
 std::optional<std::string> getenv(const std::string& name) {
+    detail::checkNoNul(name, "process::getenv", "the name");
     const std::wstring w = win::widen(name);
     const DWORD n = ::GetEnvironmentVariableW(w.c_str(), nullptr, 0);
     if (n == 0) return std::nullopt;
@@ -552,6 +559,8 @@ std::optional<std::string> getenv(const std::string& name) {
 }
 
 void setenv(const std::string& name, const std::optional<std::string>& value) {
+    detail::checkNoNul(name, "process::setenv", "the name");
+    if (value) detail::checkNoNul(*value, "process::setenv", "the value");
     if (name.empty() || name.find('=') != std::string::npos)
         throw Error(Error::Kind::InvalidArgument, "invalid environment variable name: " + name, EINVAL);
     // _wputenv_s changes both the C runtime's copy and the process's.

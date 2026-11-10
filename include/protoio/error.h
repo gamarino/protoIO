@@ -27,6 +27,8 @@ struct Error : std::runtime_error {
         InvalidArgument,     // a value the library refuses (e.g. a header with a line break)
         Internal,            // a failure inside a library protoIO relies on (e.g. OpenSSL),
                              // caused neither by the caller nor by the environment
+        Conflict,            // an operation conflicts with one already in progress on the
+                             // same object (e.g. two appends sharing a file::EndGuard)
     };
 
     Kind kind;

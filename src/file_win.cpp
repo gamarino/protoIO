@@ -28,6 +28,7 @@ namespace protoio::file {
 
 namespace fs = std::filesystem;
 using detail::fileError;
+using detail::checkNoNul;
 namespace win = detail::win;
 
 namespace {
@@ -167,6 +168,7 @@ void writeAllAt(HANDLE h, int fd, std::int64_t offset, std::string_view data, co
 } // namespace
 
 int open(const std::string& path, Mode mode) {
+    checkNoNul(path, "file::open", "the path");
     int flags = 0;
     switch (mode) {
         case Mode::Read: flags = _O_RDONLY; break;
@@ -182,6 +184,7 @@ int open(const std::string& path, Mode mode) {
 }
 
 std::string read(const std::string& path) {
+    checkNoNul(path, "file::read", "the path");
     if (isDirectory(path)) fileError(path, EISDIR, "cannot read");
     const int fd = openPath(path, _O_RDONLY);
     if (fd < 0) fileError(path, errno, "cannot read");
@@ -197,11 +200,18 @@ std::string read(const std::string& path) {
     return out;
 }
 
-void write(const std::string& path, const std::string& data) { writeWhole(path, data, false); }
+void write(const std::string& path, const std::string& data) {
+    checkNoNul(path, "file::write", "the path");  // `data` may hold NUL bytes
+    writeWhole(path, data, false);
+}
 
-void append(const std::string& path, const std::string& data) { writeWhole(path, data, true); }
+void append(const std::string& path, const std::string& data) {
+    checkNoNul(path, "file::append", "the path");  // `data` may hold NUL bytes
+    writeWhole(path, data, true);
+}
 
 std::optional<Stat> stat(const std::string& path) {
+    checkNoNul(path, "file::stat", "the path");
     const std::wstring w = win::widen(path);
     // GetFileAttributesEx describes a symbolic link itself; opening the path
     // follows it, as stat(2) does.
@@ -225,6 +235,7 @@ std::optional<Stat> stat(const std::string& path) {
 }
 
 bool remove(const std::string& path, bool recursive) {
+    checkNoNul(path, "file::remove", "the path");
     try {
         return recursive ? fs::remove_all(pathOf(path)) > 0 : fs::remove(pathOf(path));
     } catch (const fs::filesystem_error& e) {
@@ -233,6 +244,8 @@ bool remove(const std::string& path, bool recursive) {
 }
 
 void move(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::move", "the source path");
+    checkNoNul(to, "file::move", "the target path");
     // As rename(2): an existing target is replaced, even while a stream has
     // it open, and the source may be open too. SetFileInformationByHandle
     // with POSIX semantics does that (Windows 10 1709 and later, NTFS);
@@ -278,6 +291,8 @@ void move(const std::string& from, const std::string& to) {
 }
 
 void copy(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::copy", "the source path");
+    checkNoNul(to, "file::copy", "the target path");
     try {
         fs::copy(pathOf(from), pathOf(to), fs::copy_options::recursive | fs::copy_options::overwrite_existing);
     } catch (const fs::filesystem_error& e) {
@@ -286,6 +301,7 @@ void copy(const std::string& from, const std::string& to) {
 }
 
 void mkdir(const std::string& path, bool parents) {
+    checkNoNul(path, "file::mkdir", "the path");
     int err = 0;
     if (parents) {
         std::error_code ec;
@@ -298,6 +314,7 @@ void mkdir(const std::string& path, bool parents) {
 }
 
 std::vector<std::string> list(const std::string& path) {
+    checkNoNul(path, "file::list", "the path");
     std::vector<std::string> names;
     try {
         for (const auto& e : fs::directory_iterator(pathOf(path))) names.push_back(utf8Of(e.path().filename()));
@@ -309,6 +326,7 @@ std::vector<std::string> list(const std::string& path) {
 }
 
 std::string absolute(const std::string& path) {
+    checkNoNul(path, "file::absolute", "the path");
     // Lexical only: "." and ".." are folded and symbolic links are kept. The
     // answer uses the native separator, "\", and keeps it only at a root
     // ("C:\").
@@ -339,12 +357,14 @@ std::string cwd() {
 }
 
 void chdir(const std::string& path) {
+    checkNoNul(path, "file::chdir", "the path");
     if (::_wchdir(win::widen(path).c_str()) != 0) fileError(path, errno, "cannot change directory to");
 }
 
 // ------------------------------------------- positioned and durable operations
 
 int open(const std::string& path, const OpenOptions& options) {
+    checkNoNul(path, "file::open", "the path");
     const bool write = options.write || options.append;
     if (!options.read && !write) invalid("cannot open " + path + ": neither read nor write was asked for");
     if (options.exclusive && !options.create) invalid("cannot open " + path + ": exclusive needs create");
@@ -440,12 +460,17 @@ void sync(int fd) {
 
 void dataSync(int fd) { sync(fd); }  // FlushFileBuffers: Windows has no data-only flush
 
-void syncDirectory(const std::string&) {
+void syncDirectory(const std::string& path) {
+    checkNoNul(path, "file::syncDirectory", "the path");
     // A directory cannot be flushed on Windows; ProtoBase's fsync_dir skips
     // it there too.
 }
 
-void replace(const std::string& from, const std::string& to) { move(from, to); }
+void replace(const std::string& from, const std::string& to) {
+    checkNoNul(from, "file::replace", "the source path");
+    checkNoNul(to, "file::replace", "the target path");
+    move(from, to);
+}
 
 // The lock is LockFileEx on byte 0, length 1: the region msvcrt.locking(fd,
 // LK_NBLCK, 1) locks at offset 0, which is what ProtoBase's OwnerLock takes.

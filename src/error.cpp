@@ -21,6 +21,7 @@ const char* kindName(Error::Kind kind) noexcept {
         case Error::Kind::BodyTooLarge: return "BodyTooLarge";
         case Error::Kind::InvalidArgument: return "InvalidArgument";
         case Error::Kind::Internal: return "Internal";
+        case Error::Kind::Conflict: return "Conflict";
     }
     return "Unknown";
 }

@@ -8,7 +8,11 @@
 #include <vector>
 
 // Other programs and the running process. Failures to run, wait for or signal
-// a child throw protoio::Error with kind Process.
+// a child throw protoio::Error with kind Process. A program argument, a
+// working directory, an environment variable's name or value, or a shell
+// command that holds a NUL byte throws InvalidArgument before anything runs
+// (the system would read it only up to that byte); a child's input is data
+// and may hold NUL bytes.
 namespace protoio::process {
 
 struct RunResult {

@@ -498,3 +498,48 @@ TEST(Net, CloseWakesABlockedUdpReceive) {
     t.join();
     EXPECT_EQ(got.has_value(), false);
 }
+
+// ------------------------------------------------- NUL bytes in host names
+
+namespace {
+
+std::string withNul(const std::string& prefix) { return prefix + std::string("\0.example.com", 13); }
+
+void expectNulHostRefused(const std::function<void()>& f, const std::string& function) {
+    const Error e = errorOf(f);
+    EXPECT_EQ(e.kind, Error::Kind::InvalidArgument) << e.what();
+    EXPECT_EQ(std::string(e.what()), function + ": the host contains a NUL byte");
+}
+
+} // namespace
+
+// "127.0.0.1\0.example.com" would resolve as "127.0.0.1": refused before the
+// resolver, so no connection or datagram reaches the prefix.
+TEST(Net, NulInHost_IsRefused) {
+    const int listener = net::tcpListen("127.0.0.1", 0);
+    const int port = net::sockName(listener).port;
+    expectNulHostRefused([&] { net::tcpConnect(withNul("127.0.0.1"), port, 2000); }, "net::tcpConnect");
+    EXPECT_EQ(net::tcpAccept(listener, 0), std::nullopt);  // nothing connected
+    protoio::close(listener);
+    expectNulHostRefused([&] { net::tcpListen(withNul("127.0.0.1"), 0); }, "net::tcpListen");
+    expectNulHostRefused([&] { net::udpBind(withNul("127.0.0.1"), 0); }, "net::udpBind");
+
+    const int a = net::udpBind("127.0.0.1", 0);
+    const int b = net::udpBind("127.0.0.1", 0);
+    expectNulHostRefused([&] { net::udpSend(a, withNul("127.0.0.1"), net::sockName(b).port, "x"); }, "net::udpSend");
+    EXPECT_FALSE(net::udpReceive(b, 0).has_value());  // nothing sent
+    // Datagram contents are data: a NUL byte in them is sent.
+    const std::string data("a\0b", 3);
+    net::udpSend(a, "127.0.0.1", net::sockName(b).port, data);
+    const auto got = net::udpReceive(b, 2000);
+    ASSERT_TRUE(got.has_value());
+    EXPECT_EQ(got->data, data);
+    protoio::close(a);
+    protoio::close(b);
+
+    int pair[2];
+    protoio_test::socketPair(pair);
+    expectNulHostRefused([&] { net::tlsConnect(pair[0], withNul("localhost"), true); }, "net::tlsConnect");
+    protoio::close(pair[0]);
+    protoio::close(pair[1]);
+}

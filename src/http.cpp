@@ -538,6 +538,10 @@ std::string resolveRedirect(std::string_view locationIn, std::string_view baseUr
 // ------------------------------------------------------------------- client
 
 Response httpRequest(const Request& request) {
+    // The host reaches the resolver as a C string; the target and the
+    // headers are validated (no control characters) when the request is
+    // serialised. The body is data and may hold NUL bytes.
+    detail::checkNoNul(request.url, "http::httpRequest", "the URL");
     std::string method = request.method;
     std::string url = request.url;
     std::optional<std::string> body = request.body;
@@ -596,6 +600,9 @@ Response httpRequest(const Request& request) {
         const bool redirect = s == 301 || s == 302 || s == 303 || s == 307 || s == 308;
         if (!redirect || !location || redirectsLeft <= 0) return response;
         const std::string next = resolveRedirect(*location, url);
+        // The peer, not the caller, sent it: a malformed response.
+        if (next.find('\0') != std::string::npos)
+            network("http::httpRequest: the redirect location from " + printable(url) + " contains a NUL byte");
         // Another origin does not get the caller's headers (Authorization,
         // cookies), for the rest of the chain.
         if (origin(parseUrl(next)) != origin(u)) callerHeaders.clear();

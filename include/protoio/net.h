@@ -13,7 +13,9 @@
 //
 // Errors: ConnectionRefused, ConnectionTimedOut, NameLookup (a host that does
 // not resolve, or does not resolve in the socket's address family) and
-// Network for anything else, including TLS failures.
+// Network for anything else, including TLS failures. A host that holds a NUL
+// byte throws InvalidArgument before any system call ("net::tcpConnect: the
+// host contains a NUL byte"); datagram contents may hold NUL bytes.
 namespace protoio::net {
 
 struct Address {

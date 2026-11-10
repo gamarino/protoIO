@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <mutex>
 
 using protoio::Error;
@@ -513,4 +514,29 @@ TEST(HttpClient, ServerSideLimitsOverTheWire) {
     EXPECT_EQ(statusOf("GET / HTTP/1.1" + crlf + "x-long: " + std::string(9000, 'a') + crlf + crlf), 431);
     EXPECT_EQ(statusOf("POST / HTTP/1.1" + crlf + "content-length: 999999999999" + crlf + crlf), 413);
     EXPECT_EQ(statusOf("GET / HTTP/1.1" + crlf + crlf), 200);
+}
+
+// A URL with a NUL byte would reach the resolver cut at it: refused before
+// anything is sent. A body is data: NUL bytes in it are sent.
+TEST(Http, NulInUrl_IsRefused_NulInBody_IsSent) {
+    std::atomic<int> served{0};
+    HttpServer server([&](const Served& req, http::ResponseHead&) {
+        ++served;
+        return req.body;
+    });
+    http::Request r;
+    r.url = server.url("/a") + std::string("\0b", 2);
+    Error e = errorOf([&] { http::httpRequest(r); });
+    EXPECT_EQ(e.kind, Error::Kind::InvalidArgument);
+    EXPECT_EQ(std::string(e.what()), "http::httpRequest: the URL contains a NUL byte");
+    r.url = "http://127.0.0.1" + std::string("\0.example.com", 13) + ":" + std::to_string(server.port()) + "/";
+    e = errorOf([&] { http::httpRequest(r); });
+    EXPECT_EQ(e.kind, Error::Kind::InvalidArgument);
+    EXPECT_EQ(served.load(), 0);
+
+    r.method = "POST";
+    r.url = server.url();
+    r.body = std::string("a\0b", 3);
+    EXPECT_EQ(http::httpRequest(r).body, *r.body);
+    EXPECT_EQ(served.load(), 1);
 }

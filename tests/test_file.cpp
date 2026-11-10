@@ -12,7 +12,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <random>
@@ -642,5 +644,279 @@ TEST(File, TryLock_ProtoBasePeerExcluded) {
     // Released, the peer takes it.
     EXPECT_EQ(protoio::process::run(withArgs(python, {PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop})).exitCode, 0);
     EXPECT_TRUE(file::stat(ready));
+    protoio::close(fd);
+}
+
+// ------------------------------------------------- NUL bytes in path arguments
+
+namespace {
+
+// `prefix` followed by a NUL byte and more: the system would read only `prefix`.
+std::string withNul(const std::string& prefix) { return prefix + std::string("\0tail", 5); }
+
+// The function throws InvalidArgument, naming itself and the argument.
+template <typename F>
+void expectNulRefused(F f, const std::string& message) {
+    try {
+        f();
+        ADD_FAILURE() << "no Error was thrown; expected: " << message;
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::InvalidArgument) << e.what();
+        EXPECT_EQ(std::string(e.what()), message);
+    }
+}
+
+} // namespace
+
+// A path with a NUL byte used to name its prefix ("a\0b" opened "a"). Each
+// call is refused before any system call: nothing named by the prefix is
+// created, read, changed or removed.
+TEST(File, NulInPath_CreatesNothing) {
+    TempDir d;
+    const std::string pre = d / "pre";
+    expectNulRefused([&] { file::open(withNul(pre), file::Mode::Write); }, "file::open: the path contains a NUL byte");
+    expectNulRefused([&] { file::open(withNul(pre), readWriteCreate()); }, "file::open: the path contains a NUL byte");
+    expectNulRefused([&] { file::write(withNul(pre), "data"); }, "file::write: the path contains a NUL byte");
+    expectNulRefused([&] { file::append(withNul(pre), "data"); }, "file::append: the path contains a NUL byte");
+    expectNulRefused([&] { file::mkdir(withNul(pre)); }, "file::mkdir: the path contains a NUL byte");
+    expectNulRefused([&] { file::mkdir(withNul(pre), true); }, "file::mkdir: the path contains a NUL byte");
+    EXPECT_FALSE(file::stat(pre).has_value());
+    EXPECT_TRUE(file::list(d.path).empty());
+}
+
+TEST(File, NulInPath_TouchesNoExistingFile) {
+    TempDir d;
+    const std::string pre = d / "pre";
+    file::write(pre, "original");
+    expectNulRefused([&] { file::open(withNul(pre), file::Mode::Read); }, "file::open: the path contains a NUL byte");
+    expectNulRefused([&] { file::read(withNul(pre)); }, "file::read: the path contains a NUL byte");
+    expectNulRefused([&] { file::stat(withNul(pre)); }, "file::stat: the path contains a NUL byte");
+    expectNulRefused([&] { file::remove(withNul(pre)); }, "file::remove: the path contains a NUL byte");
+    expectNulRefused([&] { file::remove(withNul(d.path), true); }, "file::remove: the path contains a NUL byte");
+    expectNulRefused([&] { file::list(withNul(d.path)); }, "file::list: the path contains a NUL byte");
+    expectNulRefused([&] { file::absolute(withNul(pre)); }, "file::absolute: the path contains a NUL byte");
+    expectNulRefused([&] { file::syncDirectory(withNul(d.path)); }, "file::syncDirectory: the path contains a NUL byte");
+    const std::string other = d / "other";
+    expectNulRefused([&] { file::move(withNul(pre), other); }, "file::move: the source path contains a NUL byte");
+    expectNulRefused([&] { file::move(pre, withNul(other)); }, "file::move: the target path contains a NUL byte");
+    expectNulRefused([&] { file::replace(withNul(pre), other); }, "file::replace: the source path contains a NUL byte");
+    expectNulRefused([&] { file::replace(pre, withNul(other)); }, "file::replace: the target path contains a NUL byte");
+    expectNulRefused([&] { file::copy(withNul(pre), other); }, "file::copy: the source path contains a NUL byte");
+    expectNulRefused([&] { file::copy(pre, withNul(other)); }, "file::copy: the target path contains a NUL byte");
+    EXPECT_EQ(file::read(pre), "original");
+    EXPECT_EQ(file::list(d.path), std::vector<std::string>{"pre"});
+}
+
+TEST(File, NulInPath_ChdirKeepsTheWorkingDirectory) {
+    TempDir d;
+    const std::string before = file::cwd();
+    expectNulRefused([&] { file::chdir(withNul(d.path)); }, "file::chdir: the path contains a NUL byte");
+    EXPECT_EQ(file::cwd(), before);
+}
+
+// File contents are data: NUL bytes in them are written as they are.
+TEST(File, NulInData_IsWritten) {
+    TempDir d;
+    const std::string data("a\0b", 3);
+    file::write(d / "w", data);
+    file::append(d / "w", data);
+    EXPECT_EQ(file::read(d / "w"), data + data);
+    const int fd = file::open(d / "p", readWriteCreate());
+    file::EndGuard guard;
+    file::writeAt(fd, 0, data);
+    file::writeAt(fd, guard, 3, data);
+    EXPECT_EQ(file::appendData(fd, guard, data), 6);
+    EXPECT_EQ(file::readAt(fd, 0, 100), data + data + data);
+    protoio::close(fd);
+}
+
+// ------------------------------------------------------------ the end guard
+//
+// The tests hold a claim with EndGuard::Claim, so the conflicting call meets
+// it deterministically: no second thread, no timing.
+
+namespace {
+
+Error conflictOf(const std::function<void()>& f) {
+    try {
+        f();
+    } catch (const Error& e) {
+        return e;
+    }
+    ADD_FAILURE() << "no Error was thrown";
+    return Error(Error::Kind::Internal, "none");
+}
+
+} // namespace
+
+TEST(File, Conflict_HasAName) {
+    EXPECT_STREQ(protoio::kindName(Error::Kind::Conflict), "Conflict");
+}
+
+TEST(File, EndGuard_States) {
+    file::EndGuard g;
+    EXPECT_EQ(g.state(), 0);
+    {
+        file::EndGuard::Claim a(g, file::EndGuard::Mode::Shared, "test");
+        EXPECT_EQ(g.state(), 1);
+        file::EndGuard::Claim b(g, file::EndGuard::Mode::Shared, "test");
+        EXPECT_EQ(g.state(), 2);
+        // Exclusive needs the guard idle.
+        const Error e = conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Exclusive, "mine"); });
+        EXPECT_EQ(e.kind, Error::Kind::Conflict);
+        EXPECT_EQ(std::string(e.what()).rfind("mine: ", 0), 0u) << e.what();
+        EXPECT_EQ(g.state(), 2);
+    }
+    EXPECT_EQ(g.state(), 0);
+    {
+        file::EndGuard::Claim x(g, file::EndGuard::Mode::Exclusive, "test");
+        EXPECT_EQ(g.state(), -1);
+        EXPECT_EQ(conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Shared, "t"); }).kind,
+                  Error::Kind::Conflict);
+        EXPECT_EQ(conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Exclusive, "t"); }).kind,
+                  Error::Kind::Conflict);
+        EXPECT_EQ(g.state(), -1);
+    }
+    EXPECT_EQ(g.state(), 0);
+}
+
+TEST(File, EndGuard_GuardedCallsWhenIdle) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g;
+    EXPECT_EQ(file::appendData(fd, g, "0123"), 0);
+    file::writeAt(fd, g, 4, "4567");  // extends
+    file::writeAt(fd, g, 0, "ab");    // inside
+    EXPECT_EQ(file::appendData(fd, g, "89"), 8);
+    file::truncate(fd, g, 6);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "ab2345");
+    EXPECT_EQ(g.state(), 0);
+    protoio::close(fd);
+}
+
+// An append or a truncate in progress: appendData, truncate and an extending
+// writeAt are refused and change nothing; a writeAt inside the file goes on.
+TEST(File, EndGuard_ExclusiveHeld_RefusesWhatMovesTheEnd) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g;
+    file::writeAt(fd, g, 0, "0123456789");
+    {
+        file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
+        const Error a = conflictOf([&] { file::appendData(fd, g, "xyz"); });
+        EXPECT_EQ(a.kind, Error::Kind::Conflict);
+        EXPECT_STREQ(a.what(), "appendData: another operation that moves the end of the file is in progress "
+                               "(append and truncate need it alone)");
+        const Error t = conflictOf([&] { file::truncate(fd, g, 2); });
+        EXPECT_EQ(t.kind, Error::Kind::Conflict);
+        EXPECT_STREQ(t.what(), "truncate: another operation that moves the end of the file is in progress "
+                               "(append and truncate need it alone)");
+        const Error w = conflictOf([&] { file::writeAt(fd, g, 8, "abcd"); });
+        EXPECT_EQ(w.kind, Error::Kind::Conflict);
+        EXPECT_STREQ(w.what(), "writeAt: an append or a truncate is in progress on the file "
+                               "(it needs the end of the file alone)");
+        EXPECT_EQ(conflictOf([&] { file::writeAt(fd, g, 20, "x"); }).kind, Error::Kind::Conflict);
+        file::writeAt(fd, g, 6, "abcd");  // ends exactly at the end: inside
+        EXPECT_EQ(g.state(), -1);
+    }
+    EXPECT_EQ(file::readAt(fd, 0, 100), "012345abcd");
+    EXPECT_EQ(g.state(), 0);
+    protoio::close(fd);
+}
+
+// Extending writes in progress: more extending writes join them; appendData
+// and truncate are refused.
+TEST(File, EndGuard_SharedHeld_RefusesAppendAndTruncate) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g;
+    file::writeAt(fd, g, 0, "0123");
+    {
+        file::EndGuard::Claim held(g, file::EndGuard::Mode::Shared, "test");
+        EXPECT_EQ(conflictOf([&] { file::appendData(fd, g, "x"); }).kind, Error::Kind::Conflict);
+        EXPECT_EQ(conflictOf([&] { file::truncate(fd, g, 0); }).kind, Error::Kind::Conflict);
+        file::writeAt(fd, g, 4, "4567");
+        EXPECT_EQ(g.state(), 1);
+    }
+    EXPECT_EQ(file::readAt(fd, 0, 100), "01234567");
+    EXPECT_EQ(file::size(fd), 8);
+    protoio::close(fd);
+}
+
+// A claim is released when the guarded call fails too, and arguments are
+// validated before any claim.
+TEST(File, EndGuard_ReleasedOnFailure) {
+    TempDir d;
+    file::EndGuard g;
+    const int ap = file::open(d / "a", file::OpenOptions{.read = true, .write = true, .create = true, .append = true});
+    EXPECT_EQ(kindOf([&] { file::writeAt(ap, g, 0, "x"); }), Error::Kind::InvalidArgument);  // append descriptor
+    EXPECT_EQ(g.state(), 0);
+    protoio::close(ap);
+    const int ro = file::open(d / "a", file::Mode::Read);
+    EXPECT_NE(kindOf([&] { file::appendData(ro, g, "x"); }), Error::Kind::Conflict);  // not writable
+    EXPECT_EQ(g.state(), 0);
+    EXPECT_NE(kindOf([&] { file::truncate(ro, g, 0); }), Error::Kind::Conflict);
+    EXPECT_EQ(g.state(), 0);
+    {
+        file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
+        EXPECT_EQ(kindOf([&] { file::writeAt(ro, g, -1, "x"); }), Error::Kind::InvalidArgument);
+        EXPECT_EQ(kindOf([&] { file::truncate(ro, g, -1); }), Error::Kind::InvalidArgument);
+    }
+    EXPECT_EQ(g.state(), 0);
+    protoio::close(ro);
+}
+
+// The guard is per EndGuard object: another guard on the same descriptor,
+// and the unguarded calls, do not see it.
+TEST(File, EndGuard_GuardsOnlyItsOwnCallers) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g, other;
+    file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
+    EXPECT_EQ(file::appendData(fd, other, "ab"), 0);
+    EXPECT_EQ(file::appendData(fd, "cd"), 2);
+    file::truncate(fd, 3);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "abc");
+    protoio::close(fd);
+}
+
+// Racing appenders on one guard: whatever the interleaving, each call either
+// lands its record alone or is refused with Conflict and writes nothing, so
+// every answered offset holds exactly its own record and the file holds
+// nothing else. (No timing: the assertions hold for every interleaving.)
+TEST(File, EndGuard_RacingAppenders_NeverShareAnOffset) {
+    TempDir d;
+    const int fd = file::open(d / "race", readWriteCreate());
+    file::EndGuard g;
+    constexpr int kThreads = 4, kCalls = 300;
+    std::vector<std::vector<std::pair<std::int64_t, std::string>>> landed(kThreads);
+    std::atomic<int> refused{0};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t] {
+            for (int i = 0; i < kCalls; ++i) {
+                char rec[9];
+                std::snprintf(rec, sizeof rec, "%c%07d", 'a' + t, i);
+                try {
+                    landed[t].emplace_back(file::appendData(fd, g, std::string_view(rec, 8)), std::string(rec, 8));
+                } catch (const Error& e) {
+                    EXPECT_EQ(e.kind, Error::Kind::Conflict);
+                    ++refused;
+                }
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+    std::size_t total = 0;
+    for (const auto& v : landed) {
+        for (const auto& [offset, rec] : v) {
+            EXPECT_EQ(offset % 8, 0);
+            EXPECT_EQ(file::readAt(fd, offset, 8), rec);
+        }
+        total += v.size();
+    }
+    EXPECT_EQ(total + static_cast<std::size_t>(refused.load()), static_cast<std::size_t>(kThreads * kCalls));
+    EXPECT_EQ(file::size(fd), static_cast<std::int64_t>(total * 8));
+    EXPECT_EQ(g.state(), 0);
     protoio::close(fd);
 }

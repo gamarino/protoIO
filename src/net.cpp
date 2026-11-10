@@ -353,6 +353,7 @@ SOCKET connectOnce(const addrinfo* ai, int timeoutMs, int& err) {
 } // namespace
 
 int tcpConnect(const std::string& host, int port, int timeoutMs) {
+    detail::checkNoNul(host, "net::tcpConnect", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host, port, SOCK_STREAM, false, addrs);
@@ -386,6 +387,7 @@ int tcpConnect(const std::string& host, int port, int timeoutMs) {
 }
 
 int tcpListen(const std::string& host, int port, int backlog) {
+    detail::checkNoNul(host, "net::tcpListen", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host, port, SOCK_STREAM, true, addrs);
@@ -444,6 +446,7 @@ Address peerName(int fd) { return nameOf(fd, true); }
 std::uintptr_t nativeSocket(int fd) { return static_cast<std::uintptr_t>(native(fd)); }
 
 void tlsConnect(int fd, const std::string& host, bool verify) {
+    detail::checkNoNul(host, "net::tlsConnect", "the host");
     auto st = detail::fdState(fd);
     const SOCKET s = native(fd);
     std::string failure;
@@ -477,6 +480,7 @@ void tlsConnect(int fd, const std::string& host, bool verify) {
 }
 
 int udpBind(const std::string& host, int port) {
+    detail::checkNoNul(host, "net::udpBind", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host.empty() ? "0.0.0.0" : host, port, SOCK_DGRAM, true, addrs);
@@ -505,6 +509,7 @@ int udpBind(const std::string& host, int port) {
 }
 
 void udpSend(int fd, const std::string& host, int port, std::string_view data) {
+    detail::checkNoNul(host, "net::udpSend", "the host");  // `data` may hold NUL bytes
     checkPort(port);
     auto st = detail::fdState(fd);  // held: a concurrent close cannot free the socket under us
     const SOCKET s = native(fd);
@@ -563,6 +568,7 @@ std::optional<Datagram> udpReceive(int fd, int timeoutMs) {
 #else
 
 int tcpConnect(const std::string& host, int port, int timeoutMs) {
+    detail::checkNoNul(host, "net::tcpConnect", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host, port, SOCK_STREAM, false, addrs);
@@ -596,6 +602,7 @@ int tcpConnect(const std::string& host, int port, int timeoutMs) {
 }
 
 int tcpListen(const std::string& host, int port, int backlog) {
+    detail::checkNoNul(host, "net::tcpListen", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host, port, SOCK_STREAM, true, addrs);
@@ -645,6 +652,7 @@ Address sockName(int fd) { return nameOf(fd, false); }
 Address peerName(int fd) { return nameOf(fd, true); }
 
 void tlsConnect(int fd, const std::string& host, bool verify) {
+    detail::checkNoNul(host, "net::tlsConnect", "the host");
     auto st = detail::fdState(fd);
     std::string failure;
     int err = 0;
@@ -677,6 +685,7 @@ void tlsConnect(int fd, const std::string& host, bool verify) {
 }
 
 int udpBind(const std::string& host, int port) {
+    detail::checkNoNul(host, "net::udpBind", "the host");
     checkPort(port);
     AddrList addrs;
     resolve(host.empty() ? "0.0.0.0" : host, port, SOCK_DGRAM, true, addrs);
@@ -698,6 +707,7 @@ int udpBind(const std::string& host, int port) {
 }
 
 void udpSend(int fd, const std::string& host, int port, std::string_view data) {
+    detail::checkNoNul(host, "net::udpSend", "the host");  // `data` may hold NUL bytes
     checkPort(port);
     auto st = detail::fdState(fd);  // held: a concurrent close cannot free the number under us
     // Resolve to the socket's own address family: an IPv4 socket cannot send

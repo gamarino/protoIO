@@ -11,6 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -94,6 +96,36 @@ std::string errorText(int err);
 
 // ENOENT -> FileNotFound, EEXIST -> FileExists, anything else -> FileSystem.
 [[noreturn]] void fileError(const std::string& path, int err, const char* action);
+
+// Refuses a string the library would hand to the operating system as a C
+// string (a path, a host name, a program argument, an environment name or
+// value, a working directory) when it holds a NUL byte: the system would
+// read it only up to that byte, so "a\0b" would name "a". Throws
+// InvalidArgument with "<function>: <what> contains a NUL byte", e.g.
+// "file::open: the path contains a NUL byte". Called at the API boundary,
+// before any system call. Never used for data arguments (file contents,
+// process input, HTTP bodies), where a NUL byte is legitimate.
+inline void checkNoNul(std::string_view s, const char* function, std::string_view what) {
+    if (s.find('\0') == std::string_view::npos) return;
+    std::string message(function);
+    message += ": ";
+    message += what;
+    message += " contains a NUL byte";
+    throw Error(Error::Kind::InvalidArgument, message);
+}
+
+// checkNoNul on every program argument ("argument <i>") and on every name
+// and value of a child's environment ("the name of environment entry <i>",
+// "the value of environment entry <i>").
+inline void checkNoNulArgv(const std::vector<std::string>& argv, const char* function) {
+    for (std::size_t i = 0; i < argv.size(); ++i) checkNoNul(argv[i], function, "argument " + std::to_string(i));
+}
+inline void checkNoNulEnvironment(const std::vector<std::pair<std::string, std::string>>& vars, const char* function) {
+    for (std::size_t i = 0; i < vars.size(); ++i) {
+        checkNoNul(vars[i].first, function, "the name of environment entry " + std::to_string(i));
+        checkNoNul(vars[i].second, function, "the value of environment entry " + std::to_string(i));
+    }
+}
 
 // ECONNREFUSED -> ConnectionRefused; ETIMEDOUT, EAGAIN -> ConnectionTimedOut;
 // anything else -> Network.

@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Gustavo Marino <gamarino@gmail.com>. MIT licensed.
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
@@ -11,7 +12,11 @@
 
 // Files and directories. Every function may block. Failures throw
 // protoio::Error with kind FileNotFound (ENOENT), FileExists (EEXIST) or
-// FileSystem (anything else); the message names the path.
+// FileSystem (anything else); the message names the path. A path that holds
+// a NUL byte throws InvalidArgument before any system call (the system would
+// read the path only up to that byte): "file::open: the path contains a NUL
+// byte". File contents (the `data` of write, append, writeAt, appendData)
+// may hold NUL bytes.
 namespace protoio::file {
 
 enum class Mode {
@@ -122,16 +127,109 @@ void writeAt(int fd, std::int64_t offset, std::string_view data);
 // The offset is the end of the file just before the write, and neither POSIX
 // nor Windows reports atomically where an append landed, so concurrent
 // appenders on one descriptor, or other processes appending to the same
-// file, are not supported. protoIO does not detect a violation; a runtime
-// that exposes appendData should (protoST's BinaryFile refuses such
-// concurrent calls with an Error).
+// file, are not supported. This overload has no guard and does not detect a
+// violation; the overload that takes an EndGuard (below) refuses one.
 std::int64_t appendData(int fd, std::string_view data);
 
 // The size of the file, in bytes (fstat; GetFileSizeEx).
 std::int64_t size(int fd);
 
-// Sets the size of the file (ftruncate), cutting it or extending it with zeros.
+// Sets the size of the file (ftruncate), cutting it or extending it with
+// zeros. This overload has no guard (see EndGuard below).
 void truncate(int fd, std::int64_t size);
+
+// ------------------------------------------------------------ the end guard
+//
+// appendData answers where its bytes landed only when nothing else moves the
+// end of the file during the call. An EndGuard makes a violation of that
+// contract fail loudly instead of corrupting offsets: the operations that
+// move the end announce themselves on it, and the one that collides throws
+// Error with kind Conflict and does nothing. It is one atomic counter, used
+// with compare-and-swap only: no lock, no waiting, no timing.
+//
+//    0      idle: no guarded call is moving the end;
+//    n > 0  n writeAt calls that extend the file are in progress. SHARED:
+//           each writes its own bytes at its own offset and none relies on
+//           where the end is, so they run together;
+//   -1      one appendData or truncate is in progress. EXCLUSIVE: they read
+//           or move the end and need it alone.
+//
+// So appendData and truncate are refused while any other guarded call moves
+// the end, and an extending writeAt is refused while an appendData or a
+// truncate runs. A writeAt that stays inside the file takes no claim and is
+// never refused: overwrites stay concurrent. Every claim is released when
+// the call ends, by return or by exception.
+//
+// Scope: an EndGuard guards only the callers that SHARE THIS EndGuard
+// OBJECT. Calls through the unguarded overloads, through another EndGuard,
+// on another descriptor of the same file, or in another process are not
+// seen. A runtime keeps one EndGuard beside each descriptor it exposes as a
+// file object (protoST's BinaryFile does) and routes every appendData,
+// writeAt and truncate of that object through it. The guard must outlive
+// every claim on it.
+//
+// The size an extending writeAt is judged by is read before its claim: a
+// truncate that shrinks the file after that read lets the write extend it
+// unclaimed. That is the caller's own race (truncating a region another
+// thread is writing into); appendData's answer stays correct regardless.
+class EndGuard {
+public:
+    enum class Mode {
+        Shared,     // an extending writeAt: any number at once, never with an Exclusive one
+        Exclusive,  // an appendData or a truncate: alone
+    };
+
+    // A claim on a guard, released by its destructor. The guarded functions
+    // below take one; a runtime may also hold one around operations of its
+    // own that move the end of the file (tests use it to hold the guard
+    // deterministically).
+    class Claim {
+    public:
+        // Takes `mode` on `guard`, or throws Error (Conflict) when the guard
+        // is in a conflicting state, with a message that begins with
+        // `operation` (e.g. "appendData").
+        Claim(EndGuard& guard, Mode mode, std::string_view operation);
+        ~Claim();
+        Claim(const Claim&) = delete;
+        Claim& operator=(const Claim&) = delete;
+        Claim(Claim&&) = delete;
+        Claim& operator=(Claim&&) = delete;
+
+    private:
+        EndGuard& guard_;
+        const Mode mode_;
+    };
+
+    EndGuard() noexcept = default;
+    EndGuard(const EndGuard&) = delete;
+    EndGuard& operator=(const EndGuard&) = delete;
+    EndGuard(EndGuard&&) = delete;
+    EndGuard& operator=(EndGuard&&) = delete;
+
+    // The state: 0, n > 0 or -1, as above. A snapshot for diagnostics and
+    // tests; another thread may change it at once.
+    int state() const noexcept { return state_.load(std::memory_order_acquire); }
+
+private:
+    std::atomic<int> state_{0};
+};
+
+// appendData under an Exclusive claim on `guard`. Refused (Conflict, nothing
+// written) while another guarded appendData, truncate or extending writeAt
+// is in progress on the same guard.
+std::int64_t appendData(int fd, EndGuard& guard, std::string_view data);
+
+// writeAt; when the write would extend the file (offset + data.size() >
+// size(fd)), under a Shared claim on `guard`, refused (Conflict, nothing
+// written) while a guarded appendData or truncate is in progress. A write
+// inside the file takes no claim. A negative offset throws InvalidArgument
+// before any claim.
+void writeAt(int fd, EndGuard& guard, std::int64_t offset, std::string_view data);
+
+// truncate under an Exclusive claim on `guard`. Refused (Conflict, the size
+// unchanged) while another guarded call moves the end. A negative size
+// throws InvalidArgument before any claim.
+void truncate(int fd, EndGuard& guard, std::int64_t size);
 
 // Makes the file's data and metadata durable: fsync, FlushFileBuffers on
 // Windows. As CPython's os.fsync, on macOS it is plain fsync, not
