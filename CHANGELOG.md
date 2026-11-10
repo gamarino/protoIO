@@ -5,7 +5,7 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
-## 0.4.0 - not yet tagged
+## 0.4.0 - 2026-11-10
 
 A minor release: new API, a new `Error::Kind` value and a changed answer of
 `file::stat`.
