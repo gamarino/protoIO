@@ -58,6 +58,7 @@ add_library(protoio STATIC
     src/net.cpp
     src/http.cpp
     src/encoding.cpp
+    src/crc32.cpp
     ${PROTOIO_PLATFORM_SOURCES}
 )
 add_library(protoIO::protoio ALIAS protoio)
