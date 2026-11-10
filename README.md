@@ -69,19 +69,26 @@ on-disk directory with them). Contracts worth knowing:
   starts, which is only well defined with a single appender at a time.
   Concurrent `readAt` calls on the same descriptor are safe. `writeAt` on an
   append descriptor throws `InvalidArgument`.
-- **End guard** (0.3.1): `file::EndGuard` makes a violation of that contract
-  fail loudly instead of corrupting offsets. The overloads
-  `appendData(fd, guard, data)`, `writeAt(fd, guard, offset, data)` and
-  `truncate(fd, guard, size)` claim it: `appendData` and `truncate`
-  exclusively, a `writeAt` that extends the file shared (any number of them
-  at once), a `writeAt` inside the file not at all. A conflicting call throws
-  `Conflict` and does nothing; claims are released on every path. It is one
-  atomic counter, compare-and-swap only, no lock and no waiting. It guards
-  only the callers that share the same `EndGuard` object, not other
-  descriptors, other guards or other processes: a runtime keeps one beside
-  each file object it exposes. `EndGuard::Claim` (RAII) is public, for a
-  runtime's own operations that move the end and for deterministic tests.
-  The overloads without a guard remain and check nothing.
+- **End guard** (0.4.0): `file::EndGuard` makes a breach of that contract
+  fail loudly instead of corrupting data. It has four uses, claimed by the
+  guarded overloads:
+  - `appendData(fd, guard, data)` claims `Append`;
+  - `truncate(fd, guard, size)` claims `Truncate`;
+  - `writeAt(fd, guard, offset, data)` claims `Inside`, then reads the size,
+    and also claims `Extend` when the write extends the file.
+
+  `Truncate` conflicts with every use. `Append` conflicts with `Append` and
+  `Extend`. `Inside` conflicts only with `Truncate`, so in-file writes run
+  beside an append, and a truncate can never shrink the file under a write
+  that was judged to be inside. A conflicting call throws `Conflict` and does
+  nothing. The state is one 64-bit atomic word, changed by compare-and-swap
+  only, with no lock and no waiting. For the callers that share one guard,
+  an appended record's bytes land at the answered offset. Not seen: the
+  unguarded overloads, other guards, other I/O on the descriptor, other
+  descriptors and other processes. A runtime keeps one guard beside each
+  file object it exposes. `EndGuard::Claim` (RAII) is public.
+- `file::stat` answers `std::nullopt` for a path with a NUL byte: no file
+  can have that name.
 - `syncDirectory` is a no-op on Windows, where a directory cannot be synced.
 - The lock interoperates with ProtoBase: `flock` on POSIX, `LockFileEx` on
   byte 0 (length 1) on Windows, so each excludes the other. It belongs to the
@@ -183,7 +190,8 @@ A string the library hands to the operating system as a C string (a file
 path, a host name, a URL, a program argument, a working directory, an
 environment variable's name or value, a shell command) throws
 `InvalidArgument` when it holds a NUL byte, before any system call: the
-system would read it only up to that byte, so `"a\0b"` would name `"a"`. The
+system would read it only up to that byte, so `"a\0b"` would name `"a"`
+(`file::stat` instead answers `std::nullopt`: nothing can exist there). The
 message names the function and the argument, e.g. `file::open: the path
 contains a NUL byte`. Data arguments (file contents, process input, datagram
 and HTTP bodies) may hold NUL bytes.
@@ -203,7 +211,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack' --output-on-failure
 
-# Debian package: protoio-dev_0.3.1_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.4.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -382,7 +390,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.3 CONFIG QUIET)
+find_package(protoIO 0.4 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.

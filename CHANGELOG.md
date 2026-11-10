@@ -5,36 +5,64 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
-## 0.3.1 - not yet tagged
+## 0.4.0 - not yet tagged
+
+A minor release: new API, a new `Error::Kind` value and a changed answer of
+`file::stat`.
 
 ### Added
 
-- `file::EndGuard`, moved from protoST's `BinaryFile` so every runtime gets
-  it: one atomic counter per open file object, compare-and-swap only (0 idle,
-  n > 0 extending writes in progress, -1 one append or truncate in
-  progress). Guarded overloads `appendData(fd, guard, data)` (exclusive),
-  `writeAt(fd, guard, offset, data)` (shared, and only when the write extends
-  the file) and `truncate(fd, guard, size)` (exclusive) refuse a conflicting
-  call with an Error and do nothing; every claim is released on every path.
-  `EndGuard::Claim` is the public RAII claim they use. The guard sees only the
-  callers sharing one `EndGuard` object. The unguarded overloads are
-  unchanged.
-- `Error::Kind::Conflict` (`kindName`: "Conflict"), appended after `Internal`:
-  an operation conflicts with one already in progress on the same object.
-  The guarded file operations throw it. A runtime that maps kinds with an
-  exhaustive `switch` must add a case.
+- `file::EndGuard`, grown from protoST's `BinaryFile` end guard so every
+  runtime gets it. One 64-bit atomic word per open file object (append flag,
+  truncate flag, extending-writes count, in-file-writes count), changed by
+  compare-and-swap only: no lock, no waiting. Four uses, claimed through the
+  public RAII `EndGuard::Claim` and named by `EndGuard::Use`:
+  `Append` (conflicts with Append, Truncate, Extend), `Truncate` (with
+  everything), `Extend` (with Append, Truncate) and `Inside` (with Truncate
+  only). Guarded overloads `appendData(fd, guard, data)`,
+  `writeAt(fd, guard, offset, data)` (claims Inside, then reads the size, and
+  also claims Extend when the write extends the file) and
+  `truncate(fd, guard, size)` refuse a conflicting call with `Conflict` and
+  do nothing; every claim is released on every path. For callers sharing one
+  guard, an appended record's bytes land at the answered offset and no
+  guarded write becomes an extending one under a truncate; other descriptors,
+  other processes, other guards, sequential I/O on the descriptor and the
+  unguarded overloads are not seen (see `file.h`). The unguarded overloads
+  remain.
+- `Error::Kind::Conflict` (`kindName`: "Conflict"), appended after `Internal`
+  (no existing value changes): an operation conflicts with one already in
+  progress on the same object. The guarded file operations throw it.
 
-### Fixed
+### Changed
 
 - A string handed to the operating system as a C string no longer
   truncates silently at an embedded NUL byte (`"a\0b"` used to open `"a"`).
-  File paths (every path argument of `protoio/file.h`), process arguments,
-  working directories, environment names and values, shell commands
-  (`protoio/process.h`), host names (`protoio/net.h`) and HTTP URLs
-  (`protoio/http.h`) are refused with `InvalidArgument` and a message naming
-  the function and the argument, before any system call. A redirect location
-  holding a NUL byte is a malformed response (`Network`). Data arguments
-  (file contents, process input, datagram and HTTP bodies) are unchanged.
+  File paths (every path argument of `protoio/file.h` except `stat`'s),
+  process arguments, working directories, environment names and values,
+  shell commands (`protoio/process.h`), host names (`protoio/net.h`) and
+  HTTP URLs (`protoio/http.h`) are refused with `InvalidArgument` and a
+  message naming the function and the argument, before any system call. A
+  redirect location holding a NUL byte is a malformed response (`Network`).
+  Data arguments (file contents, process input, datagram and HTTP bodies)
+  are unchanged.
+- `file::stat` answers `std::nullopt` for a path holding a NUL byte, without
+  a system call (no file can have that name); it used to answer about the
+  prefix. Existence predicates built on it now answer false, as the JVM's
+  `File.exists()` and Python's `os.path.exists` do.
+- POSIX `appendData` reads the end with `fstat` and writes with `pwrite` at
+  that offset, as the Windows version does: it no longer moves the file
+  position, and a stream read or write on the same descriptor can no longer
+  redirect its bytes. On an `append` descriptor Linux's `pwrite` appends
+  regardless of the offset, which under the one-appender contract is the
+  same place.
+
+### Upgrading
+
+- Runtimes that map `Error::Kind` with an exhaustive `switch` (protoST,
+  protoScala, protoClojure) must add a case for `Conflict`; under `-Werror`
+  the missing case is a build error (`-Wswitch`).
+- The CMake package uses `SameMinorVersion` compatibility: a consumer of the
+  new API must ask for `find_package(protoIO 0.4 ...)`.
 
 ## 0.3.0 - 2026-11-09
 

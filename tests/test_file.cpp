@@ -690,7 +690,9 @@ TEST(File, NulInPath_TouchesNoExistingFile) {
     file::write(pre, "original");
     expectNulRefused([&] { file::open(withNul(pre), file::Mode::Read); }, "file::open: the path contains a NUL byte");
     expectNulRefused([&] { file::read(withNul(pre)); }, "file::read: the path contains a NUL byte");
-    expectNulRefused([&] { file::stat(withNul(pre)); }, "file::stat: the path contains a NUL byte");
+    // stat answers "nothing there" (no file can have that name), not the prefix's stat.
+    EXPECT_FALSE(file::stat(withNul(pre)).has_value());
+    EXPECT_FALSE(file::stat(withNul(d.path)).has_value());
     expectNulRefused([&] { file::remove(withNul(pre)); }, "file::remove: the path contains a NUL byte");
     expectNulRefused([&] { file::remove(withNul(d.path), true); }, "file::remove: the path contains a NUL byte");
     expectNulRefused([&] { file::list(withNul(d.path)); }, "file::list: the path contains a NUL byte");
@@ -737,7 +739,9 @@ TEST(File, NulInData_IsWritten) {
 
 namespace {
 
-Error conflictOf(const std::function<void()>& f) {
+using Use = file::EndGuard::Use;
+
+Error errorOf(const std::function<void()>& f) {
     try {
         f();
     } catch (const Error& e) {
@@ -747,37 +751,86 @@ Error conflictOf(const std::function<void()>& f) {
     return Error(Error::Kind::Internal, "none");
 }
 
+bool claimable(file::EndGuard& g, Use use) {
+    try {
+        file::EndGuard::Claim c(g, use, "probe");
+        return true;
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::Conflict);
+        EXPECT_EQ(std::string(e.what()).rfind("probe: ", 0), 0u) << e.what();
+        return false;
+    }
+}
+
+const char* nameOf(Use u) {
+    switch (u) {
+        case Use::Append: return "Append";
+        case Use::Truncate: return "Truncate";
+        case Use::Extend: return "Extend";
+        case Use::Inside: return "Inside";
+    }
+    return "?";
+}
+
 } // namespace
 
 TEST(File, Conflict_HasAName) {
     EXPECT_STREQ(protoio::kindName(Error::Kind::Conflict), "Conflict");
 }
 
-TEST(File, EndGuard_States) {
+// Every pair of the conflict matrix in file.h: with `held` claimed, may
+// `asked` be claimed too? The answer is symmetric, and nothing changes on a
+// refusal.
+TEST(File, EndGuard_ConflictMatrix) {
+    const Use uses[] = {Use::Append, Use::Truncate, Use::Extend, Use::Inside};
+    auto conflicts = [](Use a, Use b) {
+        if (a == Use::Truncate || b == Use::Truncate) return true;
+        if (a == Use::Inside || b == Use::Inside) return false;
+        return a == Use::Append || b == Use::Append;  // Append vs Append or Extend; Extend vs Extend shares
+    };
+    for (Use held : uses) {
+        for (Use asked : uses) {
+            file::EndGuard g;
+            {
+                file::EndGuard::Claim c(g, held, "held");
+                const file::EndGuard::State before = g.state();
+                EXPECT_EQ(claimable(g, asked), !conflicts(held, asked)) << nameOf(held) << " then " << nameOf(asked);
+                const file::EndGuard::State after = g.state();
+                EXPECT_EQ(before.append, after.append);
+                EXPECT_EQ(before.truncate, after.truncate);
+                EXPECT_EQ(before.extending, after.extending);
+                EXPECT_EQ(before.inside, after.inside);
+            }
+            EXPECT_TRUE(g.state().idle()) << nameOf(held) << " then " << nameOf(asked);
+        }
+    }
+}
+
+TEST(File, EndGuard_StateCountsSharedUses) {
     file::EndGuard g;
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     {
-        file::EndGuard::Claim a(g, file::EndGuard::Mode::Shared, "test");
-        EXPECT_EQ(g.state(), 1);
-        file::EndGuard::Claim b(g, file::EndGuard::Mode::Shared, "test");
-        EXPECT_EQ(g.state(), 2);
-        // Exclusive needs the guard idle.
-        const Error e = conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Exclusive, "mine"); });
-        EXPECT_EQ(e.kind, Error::Kind::Conflict);
-        EXPECT_EQ(std::string(e.what()).rfind("mine: ", 0), 0u) << e.what();
-        EXPECT_EQ(g.state(), 2);
+        file::EndGuard::Claim i1(g, Use::Inside, "t");
+        file::EndGuard::Claim i2(g, Use::Inside, "t");
+        file::EndGuard::Claim e1(g, Use::Extend, "t");
+        file::EndGuard::Claim e2(g, Use::Extend, "t");
+        const auto s = g.state();
+        EXPECT_EQ(s.inside, 2u);
+        EXPECT_EQ(s.extending, 2u);
+        EXPECT_FALSE(s.append);
+        EXPECT_FALSE(s.truncate);
     }
-    EXPECT_EQ(g.state(), 0);
     {
-        file::EndGuard::Claim x(g, file::EndGuard::Mode::Exclusive, "test");
-        EXPECT_EQ(g.state(), -1);
-        EXPECT_EQ(conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Shared, "t"); }).kind,
-                  Error::Kind::Conflict);
-        EXPECT_EQ(conflictOf([&] { file::EndGuard::Claim c(g, file::EndGuard::Mode::Exclusive, "t"); }).kind,
-                  Error::Kind::Conflict);
-        EXPECT_EQ(g.state(), -1);
+        file::EndGuard::Claim a(g, Use::Append, "t");
+        file::EndGuard::Claim i(g, Use::Inside, "t");  // in-file writes run beside an append
+        EXPECT_TRUE(g.state().append);
+        EXPECT_EQ(g.state().inside, 1u);
     }
-    EXPECT_EQ(g.state(), 0);
+    {
+        file::EndGuard::Claim t(g, Use::Truncate, "t");
+        EXPECT_TRUE(g.state().truncate);
+    }
+    EXPECT_TRUE(g.state().idle());
 }
 
 TEST(File, EndGuard_GuardedCallsWhenIdle) {
@@ -790,56 +843,99 @@ TEST(File, EndGuard_GuardedCallsWhenIdle) {
     EXPECT_EQ(file::appendData(fd, g, "89"), 8);
     file::truncate(fd, g, 6);
     EXPECT_EQ(file::readAt(fd, 0, 100), "ab2345");
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     protoio::close(fd);
 }
 
-// An append or a truncate in progress: appendData, truncate and an extending
-// writeAt are refused and change nothing; a writeAt inside the file goes on.
-TEST(File, EndGuard_ExclusiveHeld_RefusesWhatMovesTheEnd) {
+// An append in progress: another append, a truncate and an extending
+// writeAt are refused and change nothing; an in-file writeAt goes on.
+TEST(File, EndGuard_AppendHeld) {
     TempDir d;
     const int fd = file::open(d / "g", readWriteCreate());
     file::EndGuard g;
     file::writeAt(fd, g, 0, "0123456789");
     {
-        file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
-        const Error a = conflictOf([&] { file::appendData(fd, g, "xyz"); });
+        file::EndGuard::Claim held(g, Use::Append, "test");
+        const Error a = errorOf([&] { file::appendData(fd, g, "xyz"); });
         EXPECT_EQ(a.kind, Error::Kind::Conflict);
         EXPECT_STREQ(a.what(), "appendData: another operation that moves the end of the file is in progress "
                                "(append and truncate need it alone)");
-        const Error t = conflictOf([&] { file::truncate(fd, g, 2); });
+        const Error t = errorOf([&] { file::truncate(fd, g, 2); });
         EXPECT_EQ(t.kind, Error::Kind::Conflict);
-        EXPECT_STREQ(t.what(), "truncate: another operation that moves the end of the file is in progress "
-                               "(append and truncate need it alone)");
-        const Error w = conflictOf([&] { file::writeAt(fd, g, 8, "abcd"); });
+        EXPECT_STREQ(t.what(), "truncate: another write, append or truncate is in progress on the file "
+                               "(truncate needs the file alone)");
+        const Error w = errorOf([&] { file::writeAt(fd, g, 8, "abcd"); });
         EXPECT_EQ(w.kind, Error::Kind::Conflict);
         EXPECT_STREQ(w.what(), "writeAt: an append or a truncate is in progress on the file "
                                "(it needs the end of the file alone)");
-        EXPECT_EQ(conflictOf([&] { file::writeAt(fd, g, 20, "x"); }).kind, Error::Kind::Conflict);
+        EXPECT_EQ(errorOf([&] { file::writeAt(fd, g, 20, "x"); }).kind, Error::Kind::Conflict);
         file::writeAt(fd, g, 6, "abcd");  // ends exactly at the end: inside
-        EXPECT_EQ(g.state(), -1);
+        EXPECT_TRUE(g.state().append);
+        EXPECT_EQ(g.state().inside, 0u);
+        EXPECT_EQ(g.state().extending, 0u);
     }
     EXPECT_EQ(file::readAt(fd, 0, 100), "012345abcd");
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     protoio::close(fd);
 }
 
-// Extending writes in progress: more extending writes join them; appendData
-// and truncate are refused.
-TEST(File, EndGuard_SharedHeld_RefusesAppendAndTruncate) {
+// A truncate in progress: every guarded call is refused, in-file writes too.
+TEST(File, EndGuard_TruncateHeld) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g;
+    file::writeAt(fd, g, 0, "0123456789");
+    {
+        file::EndGuard::Claim held(g, Use::Truncate, "test");
+        const Error w = errorOf([&] { file::writeAt(fd, g, 0, "ab"); });
+        EXPECT_EQ(w.kind, Error::Kind::Conflict);
+        EXPECT_STREQ(w.what(), "writeAt: a truncate is in progress on the file (it needs the file alone)");
+        EXPECT_EQ(errorOf([&] { file::writeAt(fd, g, 8, "abcd"); }).kind, Error::Kind::Conflict);
+        EXPECT_EQ(errorOf([&] { file::appendData(fd, g, "x"); }).kind, Error::Kind::Conflict);
+        EXPECT_EQ(errorOf([&] { file::truncate(fd, g, 0); }).kind, Error::Kind::Conflict);
+    }
+    EXPECT_EQ(file::readAt(fd, 0, 100), "0123456789");
+    EXPECT_TRUE(g.state().idle());
+    protoio::close(fd);
+}
+
+// Extending writes in progress: more writes of either kind join them;
+// appendData and truncate are refused.
+TEST(File, EndGuard_ExtendHeld) {
     TempDir d;
     const int fd = file::open(d / "g", readWriteCreate());
     file::EndGuard g;
     file::writeAt(fd, g, 0, "0123");
     {
-        file::EndGuard::Claim held(g, file::EndGuard::Mode::Shared, "test");
-        EXPECT_EQ(conflictOf([&] { file::appendData(fd, g, "x"); }).kind, Error::Kind::Conflict);
-        EXPECT_EQ(conflictOf([&] { file::truncate(fd, g, 0); }).kind, Error::Kind::Conflict);
+        file::EndGuard::Claim held(g, Use::Extend, "test");
+        EXPECT_EQ(errorOf([&] { file::appendData(fd, g, "x"); }).kind, Error::Kind::Conflict);
+        EXPECT_EQ(errorOf([&] { file::truncate(fd, g, 0); }).kind, Error::Kind::Conflict);
         file::writeAt(fd, g, 4, "4567");
-        EXPECT_EQ(g.state(), 1);
+        file::writeAt(fd, g, 0, "a");
+        EXPECT_EQ(g.state().extending, 1u);
     }
-    EXPECT_EQ(file::readAt(fd, 0, 100), "01234567");
-    EXPECT_EQ(file::size(fd), 8);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "a1234567");
+    protoio::close(fd);
+}
+
+// An in-file write in progress: a truncate is refused (it could turn the
+// write into an extending one); an append is NOT refused, nor are writes.
+TEST(File, EndGuard_InsideHeld) {
+    TempDir d;
+    const int fd = file::open(d / "g", readWriteCreate());
+    file::EndGuard g;
+    file::writeAt(fd, g, 0, "0123");
+    {
+        file::EndGuard::Claim held(g, Use::Inside, "test");
+        const Error t = errorOf([&] { file::truncate(fd, g, 0); });
+        EXPECT_EQ(t.kind, Error::Kind::Conflict);
+        EXPECT_EQ(file::appendData(fd, g, "4567"), 4);
+        file::writeAt(fd, g, 8, "89");
+        file::writeAt(fd, g, 0, "a");
+        EXPECT_EQ(g.state().inside, 1u);
+    }
+    EXPECT_EQ(file::readAt(fd, 0, 100), "a123456789");
+    EXPECT_TRUE(g.state().idle());
     protoio::close(fd);
 }
 
@@ -850,19 +946,21 @@ TEST(File, EndGuard_ReleasedOnFailure) {
     file::EndGuard g;
     const int ap = file::open(d / "a", file::OpenOptions{.read = true, .write = true, .create = true, .append = true});
     EXPECT_EQ(kindOf([&] { file::writeAt(ap, g, 0, "x"); }), Error::Kind::InvalidArgument);  // append descriptor
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     protoio::close(ap);
     const int ro = file::open(d / "a", file::Mode::Read);
     EXPECT_NE(kindOf([&] { file::appendData(ro, g, "x"); }), Error::Kind::Conflict);  // not writable
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     EXPECT_NE(kindOf([&] { file::truncate(ro, g, 0); }), Error::Kind::Conflict);
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
+    EXPECT_NE(kindOf([&] { file::writeAt(ro, g, 5, "x"); }), Error::Kind::Conflict);  // extending, not writable
+    EXPECT_TRUE(g.state().idle());
     {
-        file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
+        file::EndGuard::Claim held(g, Use::Truncate, "test");
         EXPECT_EQ(kindOf([&] { file::writeAt(ro, g, -1, "x"); }), Error::Kind::InvalidArgument);
         EXPECT_EQ(kindOf([&] { file::truncate(ro, g, -1); }), Error::Kind::InvalidArgument);
     }
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     protoio::close(ro);
 }
 
@@ -872,7 +970,7 @@ TEST(File, EndGuard_GuardsOnlyItsOwnCallers) {
     TempDir d;
     const int fd = file::open(d / "g", readWriteCreate());
     file::EndGuard g, other;
-    file::EndGuard::Claim held(g, file::EndGuard::Mode::Exclusive, "test");
+    file::EndGuard::Claim held(g, Use::Truncate, "test");
     EXPECT_EQ(file::appendData(fd, other, "ab"), 0);
     EXPECT_EQ(file::appendData(fd, "cd"), 2);
     file::truncate(fd, 3);
@@ -880,10 +978,38 @@ TEST(File, EndGuard_GuardsOnlyItsOwnCallers) {
     protoio::close(fd);
 }
 
+// appendData writes at the end it read, never at the file position: moving
+// the position (a stream read) does not redirect the bytes, on a plain and on
+// an append descriptor (where Linux's pwrite appends regardless of the
+// offset, which under the contract is the same place).
+TEST(File, AppendData_IgnoresTheFilePosition) {
+    TempDir d;
+    for (const bool appendMode : {false, true}) {
+        const std::string name = d / (appendMode ? "append" : "plain");
+        file::write(name, "line1\nline2\n");
+        const int fd = file::open(name, file::OpenOptions{.read = true, .write = true, .append = appendMode});
+        EXPECT_EQ(protoio::readLine(fd), "line1");  // moves the file position
+        EXPECT_EQ(file::appendData(fd, "XY"), 12) << name;
+        EXPECT_EQ(file::appendData(fd, "Z"), 14) << name;
+        EXPECT_EQ(file::readAt(fd, 0, 100), "line1\nline2\nXYZ") << name;
+        EXPECT_EQ(protoio::readLine(fd), "line2");  // the stream is undisturbed
+#ifndef _WIN32
+        // Nor does it move the position: no lseek(SEEK_END), no write(2).
+        ASSERT_EQ(::lseek(fd, 3, SEEK_SET), 3);
+        EXPECT_EQ(file::appendData(fd, "W"), 15) << name;
+        EXPECT_EQ(::lseek(fd, 0, SEEK_CUR), 3) << name;
+#endif
+        protoio::close(fd);
+    }
+}
+
 // Racing appenders on one guard: whatever the interleaving, each call either
 // lands its record alone or is refused with Conflict and writes nothing, so
 // every answered offset holds exactly its own record and the file holds
-// nothing else. (No timing: the assertions hold for every interleaving.)
+// nothing else. The assertions hold for every interleaving (no timing), but
+// the test only detects a broken guard when the threads happen to overlap:
+// the deterministic Claim tests above are the proof of the logic; this one
+// gives ThreadSanitizer real concurrency to check.
 TEST(File, EndGuard_RacingAppenders_NeverShareAnOffset) {
     TempDir d;
     const int fd = file::open(d / "race", readWriteCreate());
@@ -917,6 +1043,6 @@ TEST(File, EndGuard_RacingAppenders_NeverShareAnOffset) {
     }
     EXPECT_EQ(total + static_cast<std::size_t>(refused.load()), static_cast<std::size_t>(kThreads * kCalls));
     EXPECT_EQ(file::size(fd), static_cast<std::int64_t>(total * 8));
-    EXPECT_EQ(g.state(), 0);
+    EXPECT_TRUE(g.state().idle());
     protoio::close(fd);
 }

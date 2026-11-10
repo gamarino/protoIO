@@ -211,7 +211,9 @@ void append(const std::string& path, const std::string& data) {
 }
 
 std::optional<Stat> stat(const std::string& path) {
-    checkNoNul(path, "file::stat", "the path");
+    // No file can have a name with a NUL byte (see file.h); answered without
+    // a system call, which would read the path only up to that byte.
+    if (path.find('\0') != std::string::npos) return std::nullopt;
     const std::wstring w = win::widen(path);
     // GetFileAttributesEx describes a symbolic link itself; opening the path
     // follows it, as stat(2) does.

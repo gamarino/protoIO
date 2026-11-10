@@ -104,7 +104,9 @@ void append(const std::string& path, const std::string& data) {
 }
 
 std::optional<Stat> stat(const std::string& path) {
-    checkNoNul(path, "file::stat", "the path");
+    // No file can have a name with a NUL byte (see file.h); answered without
+    // a system call, which would read the path only up to that byte.
+    if (path.find('\0') != std::string::npos) return std::nullopt;
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) return std::nullopt;
     Stat s;
@@ -278,12 +280,20 @@ void writeAt(int fd, std::int64_t offset, std::string_view data) {
 
 std::int64_t appendData(int fd, std::string_view data) {
     // Valid under the one-appender contract: nobody else moves the end
-    // between this answer and the write.
-    const off_t start = ::lseek(fd, 0, SEEK_END);
-    if (start < 0) fileError(fdName(fd), errno, "cannot append to");
+    // between this answer and the write. The write names its offset (pwrite)
+    // and never uses the file position, which a stream read or write on the
+    // same descriptor moves, as file_win.cpp does. On an O_APPEND descriptor
+    // Linux's pwrite appends and ignores the offset (other systems honour
+    // it); under the contract the end is `start` + what was written so far,
+    // so the bytes land at the same place either way. The end is read with
+    // fstat, not lseek(SEEK_END), so the file position is not moved either.
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot append to");
+    const off_t start = st.st_size;
     std::size_t done = 0;
     while (done < data.size()) {
-        const ssize_t w = ::write(fd, data.data() + done, std::min(data.size() - done, kMaxChunk));
+        const ssize_t w = ::pwrite(fd, data.data() + done, std::min(data.size() - done, kMaxChunk),
+                                   static_cast<off_t>(start + static_cast<off_t>(done)));
         if (w < 0 && errno == EINTR) continue;
         if (w < 0) fileError(fdName(fd), errno, "cannot append to");
         if (w == 0) fileError(fdName(fd), EIO, "cannot append to");  // no progress: never loop forever

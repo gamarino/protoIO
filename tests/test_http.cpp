@@ -540,3 +540,23 @@ TEST(Http, NulInUrl_IsRefused_NulInBody_IsSent) {
     EXPECT_EQ(http::httpRequest(r).body, *r.body);
     EXPECT_EQ(served.load(), 1);
 }
+
+// A redirect location with a NUL byte comes from the peer: a malformed
+// response (Network), refused before any further connection.
+TEST(Http, NulInRedirectLocation_IsNetwork) {
+    std::atomic<int> requests{0};
+    RawServer server([&](int fd) {
+        http::readRequestHead(fd);
+        ++requests;
+        protoio::write(fd, std::string("HTTP/1.1 302 Found\r\nlocation: http://127.0.0.1\0.evil/next\r\n"
+                                       "content-length: 0\r\n\r\n",
+                                       80));
+    });
+    http::Request r;
+    r.url = server.url();
+    const Error e = errorOf([&] { http::httpRequest(r); });
+    EXPECT_EQ(e.kind, Error::Kind::Network) << e.what();
+    EXPECT_EQ(std::string(e.what()),
+              "http::httpRequest: the redirect location from '" + server.url() + "' contains a NUL byte");
+    EXPECT_EQ(requests.load(), 1);
+}
