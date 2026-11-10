@@ -8,6 +8,7 @@
 #include "protoio/error.h"
 
 #include <bit>
+#include <utility>
 #include <vector>
 
 namespace protoio::msgpack {

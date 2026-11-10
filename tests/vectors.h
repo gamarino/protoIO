@@ -7,8 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace protoio_test {

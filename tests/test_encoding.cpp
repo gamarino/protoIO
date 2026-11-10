@@ -120,3 +120,25 @@ TEST(Json, ReaderBasics) {
     EXPECT_EQ(protoio_test::bytesField(protoio_test::parseJson(R"({"pattern":"seq","length":253})"))[252],
               char(1));
 }
+
+// Numbers follow the JSON grammar, and the integer accessors take only
+// plain decimal text.
+TEST(Json, NumbersFollowTheGrammar) {
+    using protoio_test::parseJson;
+    for (const char* bad : {"[01]", "[1-2]", "[+1]", "[-]", "[1.]", "[.5]", "[1e]", "[1e+]", "[--1]", "[1.2.3]"})
+        EXPECT_THROW(parseJson(bad), std::runtime_error) << bad;
+    auto ok = parseJson("[0,-0,10,-1.5,2e10,2E-3,1.25e+2]");
+    EXPECT_EQ(ok.items().size(), 7u);
+    EXPECT_DOUBLE_EQ(ok[6].num(), 125.0);
+    EXPECT_EQ(ok[2].i64(), 10);
+    // Decimal strings: no whitespace, no '+'.
+    auto strs = parseJson(R"([" 12","+12","12 ","-3","7"])");
+    EXPECT_THROW(strs[0].i64(), std::runtime_error);
+    EXPECT_THROW(strs[0].u64(), std::runtime_error);
+    EXPECT_THROW(strs[1].i64(), std::runtime_error);
+    EXPECT_THROW(strs[1].u64(), std::runtime_error);
+    EXPECT_THROW(strs[2].i64(), std::runtime_error);
+    EXPECT_EQ(strs[3].i64(), -3);
+    EXPECT_THROW(strs[3].u64(), std::runtime_error);
+    EXPECT_EQ(strs[4].u64(), 7u);
+}

@@ -5,6 +5,7 @@
 #include "protoio/digest.h"
 
 #include <array>
+#include <cstddef>
 
 namespace protoio::digest {
 namespace {

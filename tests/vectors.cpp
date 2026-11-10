@@ -16,6 +16,18 @@ namespace protoio_test {
 
 namespace {
 [[noreturn]] void fail(const std::string& m) { throw std::runtime_error("json: " + m); }
+
+bool isDigit(char c) { return c >= '0' && c <= '9'; }
+
+// Plain decimal text: an optional '-' (when `sign`) and digits, nothing else
+// (strtoll alone would also take leading whitespace and '+').
+bool isDecimal(const std::string& t, bool sign) {
+    std::size_t i = sign && !t.empty() && t[0] == '-' ? 1 : 0;
+    if (i == t.size()) return false;
+    for (; i < t.size(); ++i)
+        if (!isDigit(t[i])) return false;
+    return true;
+}
 } // namespace
 
 bool JsonValue::boolean() const {
@@ -36,15 +48,16 @@ const std::string& JsonValue::numText() const {
 }
 int64_t JsonValue::i64() const {
     if (type_ != Type::Number && type_ != Type::String) fail("not an integer");
+    if (!isDecimal(text_, true)) fail("bad int64: " + text_);
     errno = 0;
     char* end = nullptr;
     long long v = std::strtoll(text_.c_str(), &end, 10);
-    if (text_.empty() || *end != '\0' || errno == ERANGE) fail("bad int64: " + text_);
+    if (*end != '\0' || errno == ERANGE) fail("bad int64: " + text_);
     return v;
 }
 uint64_t JsonValue::u64() const {
     if (type_ != Type::Number && type_ != Type::String) fail("not an integer");
-    if (text_.empty() || text_[0] == '-') fail("bad uint64: " + text_);
+    if (!isDecimal(text_, false)) fail("bad uint64: " + text_);
     errno = 0;
     char* end = nullptr;
     unsigned long long v = std::strtoull(text_.c_str(), &end, 10);
@@ -149,11 +162,22 @@ private:
         if (c == 'f') { literal("false"); v.type_ = JsonValue::Type::Bool; return v; }
         if (c == 'n') { literal("null"); return v; }
         if (c == '-' || (c >= '0' && c <= '9')) {
-            size_t start = pos_;
-            while (pos_ < s_.size() &&
-                   (s_[pos_] == '-' || s_[pos_] == '+' || s_[pos_] == '.' || s_[pos_] == 'e' ||
-                    s_[pos_] == 'E' || (s_[pos_] >= '0' && s_[pos_] <= '9')))
+            // RFC 8259: -? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?
+            const size_t start = pos_;
+            auto digits = [&] {
+                const size_t from = pos_;
+                while (pos_ < s_.size() && isDigit(s_[pos_])) ++pos_;
+                if (pos_ == from) fail("bad number at offset " + std::to_string(start));
+            };
+            if (s_[pos_] == '-') ++pos_;
+            if (pos_ < s_.size() && s_[pos_] == '0') ++pos_;  // no leading zeros
+            else digits();
+            if (pos_ < s_.size() && s_[pos_] == '.') { ++pos_; digits(); }
+            if (pos_ < s_.size() && (s_[pos_] == 'e' || s_[pos_] == 'E')) {
                 ++pos_;
+                if (pos_ < s_.size() && (s_[pos_] == '+' || s_[pos_] == '-')) ++pos_;
+                digits();
+            }
             v.type_ = JsonValue::Type::Number;
             v.text_ = s_.substr(start, pos_ - start);
             return v;
