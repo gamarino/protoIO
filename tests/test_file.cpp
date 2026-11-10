@@ -13,10 +13,12 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <random>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -538,39 +540,107 @@ TEST(File, TryLock_SecondDescriptorSameProcess_False) {
     protoio::close(b);
 }
 
+namespace {
+
+// The command that runs a Python 3 interpreter, or an empty vector when none
+// is found: python3, then python, then the Windows launcher's py -3.
+std::vector<std::string> findPython3() {
+    const std::vector<std::vector<std::string>> candidates = {{"python3"}, {"python"}, {"py", "-3"}};
+    for (const auto& c : candidates) {
+        std::vector<std::string> argv = c;
+        argv.insert(argv.end(), {"-c", "import sys; sys.exit(0 if sys.version_info[0] == 3 else 1)"});
+        try {
+            if (protoio::process::run(argv).exitCode == 0) return c;
+        } catch (const Error&) {
+            // Not installed under this name; try the next one.
+        }
+    }
+    return {};
+}
+
+std::vector<std::string> withArgs(std::vector<std::string> argv, std::initializer_list<std::string> args) {
+    argv.insert(argv.end(), args);
+    return argv;
+}
+
+// Stops a lock peer (creates its stop file) and waits for it on every exit
+// path of a test, so a failed assertion never leaves it holding the lock.
+class PeerGuard {
+public:
+    PeerGuard(std::string stop, int pid) : stop_(std::move(stop)), pid_(pid) {}
+    PeerGuard(const PeerGuard&) = delete;
+    PeerGuard& operator=(const PeerGuard&) = delete;
+    ~PeerGuard() {
+        if (waited_) return;
+        try {
+            finish();
+        } catch (const Error&) {
+            // Nothing more can be done in a destructor.
+        }
+    }
+    // Stops the peer and answers its exit code.
+    int finish() {
+        waited_ = true;
+        file::write(stop_, "");
+        return protoio::process::wait(pid_);
+    }
+
+private:
+    std::string stop_;
+    int pid_;
+    bool waited_ = false;
+};
+
+} // namespace
+
 // The lock must exclude ProtoBase's OwnerLock (proto_db/storage/ownerlock.py),
 // which a Python peer takes exactly as ProtoBase does.
 TEST(File, TryLock_ExcludesProtoBasePeer) {
-    bool havePython = false;
-    try {
-        havePython = protoio::process::run({"python3", "-c", "import sys; sys.exit(0)"}).exitCode == 0;
-    } catch (const Error&) {
-        havePython = false;
-    }
-    if (!havePython) GTEST_SKIP() << "python3 not found: ProtoBase lock interop NOT verified";
+    const std::vector<std::string> python = findPython3();
+    if (python.empty()) GTEST_SKIP() << "no Python 3 found (python3, python, py -3): ProtoBase lock interop NOT verified";
 
     TempDir d;
     const std::string lockPath = d / "owner.lock";
     const std::string ready = d / "ready";
     const std::string stop = d / "stop";
-    const int pid = protoio::process::spawn({"python3", PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop});
+    PeerGuard peer(stop, protoio::process::spawn(withArgs(python, {PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop})));
 
     bool isReady = false;
     for (int i = 0; i < 200 && !isReady; ++i) {  // 10 s
         if (file::stat(ready)) isReady = true;
         else std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
-    if (!isReady) {
-        file::write(stop, "");
-        protoio::process::wait(pid);
-        FAIL() << "the ProtoBase lock peer did not report the lock within 10 s";
-    }
+    if (!isReady) FAIL() << "the ProtoBase lock peer did not report the lock within 10 s";
 
     const int fd = file::open(lockPath, readWriteCreate());
     EXPECT_FALSE(file::tryLock(fd)) << "the lock does not exclude ProtoBase's OwnerLock";
-    file::write(stop, "");
-    EXPECT_EQ(protoio::process::wait(pid), 0);
+    EXPECT_EQ(peer.finish(), 0);
     EXPECT_TRUE(file::tryLock(fd));
     file::unlock(fd);
+    protoio::close(fd);
+}
+
+// The reverse direction: while protoIO holds the lock, ProtoBase's OwnerLock
+// cannot be taken (the peer exits 2 when the lock is busy).
+TEST(File, TryLock_ProtoBasePeerExcluded) {
+    const std::vector<std::string> python = findPython3();
+    if (python.empty()) GTEST_SKIP() << "no Python 3 found (python3, python, py -3): ProtoBase lock interop NOT verified";
+
+    TempDir d;
+    const std::string lockPath = d / "owner.lock";
+    const std::string ready = d / "ready";
+    const std::string stop = d / "stop";
+    // The stop file exists up front, so a peer that wrongly gets the lock
+    // releases it and exits 0 at once instead of holding it.
+    file::write(stop, "");
+    const int fd = file::open(lockPath, readWriteCreate());
+    ASSERT_TRUE(file::tryLock(fd));
+    const int busy = protoio::process::run(withArgs(python, {PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop})).exitCode;
+    EXPECT_EQ(busy, 2) << "ProtoBase's OwnerLock was not excluded by protoIO's lock";
+    EXPECT_FALSE(file::stat(ready));
+    file::unlock(fd);
+    // Released, the peer takes it.
+    EXPECT_EQ(protoio::process::run(withArgs(python, {PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop})).exitCode, 0);
+    EXPECT_TRUE(file::stat(ready));
     protoio::close(fd);
 }
