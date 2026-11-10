@@ -48,10 +48,36 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 |---|---|
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readBufferedLine(fd, max = 0)` (a line already buffered, never blocking), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
-| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir` |
+| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir`, and the storage operations below |
+| `protoio/encoding.h` | `encoding::putUint`/`putInt`/`putFloat64`/`putFloat32` and `getUint`/`getInt`/`getFloat64`/`getFloat32` (widths 1, 2, 4, 8; either byte order; as CPython's `struct`), `base64Encode`, `base64Decode` |
+| `protoio/digest.h` | `digest::crc32` (chainable), `crc32Combine`, `blake2b(data, digestSize, key)`, `sha256`, `hmacSha256`, and the incremental `Blake2b` and `Sha256` classes; byte-compatible with CPython's `zlib` and `hashlib` |
+| `protoio/msgpack.h` | `msgpack::Writer` (smallest encodings, as msgpack-python's `packb(use_bin_type=True)`), `Handler` (events for a runtime to build its own objects), `read(data, handler, Limits)`, `Limits {maxDepth, maxElements, strictMapKeys}` |
 | `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `run(argv, RunOptions{input, directory, environment})` also sets the child's working directory and replaces its environment, without a shell; `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
 | `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)` (an empty host: one dual-stack socket, IPv4 and IPv6), `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
 | `protoio/http.h` | The HTTP/1.1 message layer and client, below |
+
+### Storage operations and encodings
+
+Added in 0.3.0 as the ground for the runtimes' databases (ProtoBase shares its
+on-disk directory with them). Contracts worth knowing:
+
+- **File operations** (`protoio/file.h`): `open(path, OpenOptions)`, `readAt`,
+  `writeAt`, `appendData`, `size`, `truncate`, `sync`, `dataSync`,
+  `syncDirectory`, `replace`, and the lock `tryLock`/`lock`/`unlock`.
+- `readAt` answers fewer bytes than asked only at the end of the file.
+- One appender per descriptor: `appendData` answers the offset where the data
+  starts, which is only well defined with a single appender at a time.
+- `syncDirectory` is a no-op on Windows, where a directory cannot be synced.
+- The lock interoperates with ProtoBase: `flock` on POSIX, `LockFileEx` on
+  byte 0 (length 1) on Windows, so each excludes the other. It belongs to the
+  open file, not the process.
+- **MessagePack:** map keys are strict by default (only `str` and `bin`), as
+  msgpack-python 1.x. `read()` answers the bytes consumed; a caller that wants
+  `unpackb`'s ExtraData behaviour must compare it with the input size.
+  `maxDepth` 512 is stricter than msgpack-python's (about 1024).
+- `base64Decode` rejects non-canonical trailing bits that CPython accepts.
+- `blake2b` is RFC 7693 BLAKE2b with a chosen digest size, not BLAKE2b-512
+  truncated.
 
 ### HTTP (`protoio::http`)
 

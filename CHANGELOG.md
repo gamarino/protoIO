@@ -5,6 +5,26 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.3.0 - 2026-11-09
+
+### Added
+
+- Positioned and durable file operations (`protoio/file.h`):
+  `open(path, OpenOptions)`, `readAt`, `writeAt`, `appendData` (one appender
+  per descriptor), `size`, `truncate`, `sync`, `dataSync`, `syncDirectory`
+  (a no-op on Windows) and `replace`.
+- A ProtoBase-compatible inter-process lock: `tryLock`, `lock`, `unlock`
+  (`flock` on POSIX, `LockFileEx` on byte 0 on Windows).
+- `protoio/encoding.h`: fixed-width integers and IEEE 754 floats in either
+  byte order (as CPython's `struct`), and strict `base64Encode` /
+  `base64Decode`.
+- `protoio/digest.h`: `crc32`, `crc32Combine`, `blake2b` (RFC 7693), `sha256`,
+  `hmacSha256`, and incremental `Blake2b` and `Sha256`.
+- `protoio/msgpack.h`: a `Writer`, an event-based `read` with a `Handler` and
+  `Limits` (depth, element count, strict map keys), byte-compatible with
+  msgpack-python 1.x.
+- Test vectors generated with CPython under `tests/vectors`.
+
 ## 0.2.3 - not yet tagged
 
 ### Added
