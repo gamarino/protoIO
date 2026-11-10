@@ -220,7 +220,9 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n) {
     if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot read");
     if (S_ISREG(st.st_mode)) {
         const std::int64_t left = std::max<std::int64_t>(0, static_cast<std::int64_t>(st.st_size) - offset);
-        n = std::min(n, static_cast<std::size_t>(left));
+        // Compare in 64 bits: narrowing first would wrap on a 32-bit size_t and cut
+        // n below the true remainder, a short read before the end of the file.
+        if (static_cast<std::uint64_t>(left) < static_cast<std::uint64_t>(n)) n = static_cast<std::size_t>(left);
     }
     std::string out(n, '\0');
     std::size_t done = 0;
