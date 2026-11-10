@@ -2,7 +2,10 @@
 # Copyright (c) 2026 Gustavo Marino <gamarino@gmail.com>. MIT licensed.
 """Generate the CPython byte-compatibility vectors for protoIO.
 
-Run with:  python3 -I tests/vectors/generate.py
+Run with:  python3 tests/vectors/generate.py
+
+(`python3 -I` also works, but only with a system-wide or venv msgpack: -I
+ignores the per-user site directory.)
 
 Uses only zlib, hashlib, hmac, base64, struct and msgpack (1.x). The output is
 deterministic: no randomness, fixed key order, no timestamps. Binary data is
