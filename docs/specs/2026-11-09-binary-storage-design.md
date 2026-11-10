@@ -1,6 +1,6 @@
 # protoIO: binary storage, encodings and MessagePack
 
-Status: **draft for review** (2026-11-09). Author: Gustavo Marino, with Claude.
+Status: **approved** (2026-11-09). Author: Gustavo Marino, with Claude.
 Companion: protoST's language surface for these functions is specified in
 `protoST/docs/superpowers/specs/2026-11-09-bytes-files-timers-design.md`.
 
