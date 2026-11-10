@@ -82,7 +82,8 @@ int openPath(const std::string& path, int flags) {
         default: access = GENERIC_READ; break;
     }
     DWORD disposition = OPEN_EXISTING;
-    if (flags & _O_CREAT) disposition = (flags & _O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS;
+    if ((flags & _O_CREAT) && (flags & _O_EXCL)) disposition = CREATE_NEW;  // ERROR_FILE_EXISTS: EEXIST
+    else if (flags & _O_CREAT) disposition = (flags & _O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS;
     else if (flags & _O_TRUNC) disposition = TRUNCATE_EXISTING;
     const HANDLE h = ::CreateFileW(win::widen(path).c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                    nullptr, disposition, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -112,6 +113,39 @@ void writeWhole(const std::string& path, const std::string& data, bool append) {
         done += static_cast<std::size_t>(w);
     }
     if (::_close(fd) != 0) fileError(path, errno, "cannot write");
+}
+
+// The name a descriptor goes by in an error message.
+std::string fdName(int fd) { return "descriptor " + std::to_string(fd); }
+
+[[noreturn]] void invalid(const std::string& message) { throw Error(Error::Kind::InvalidArgument, message); }
+
+void checkOffset(std::int64_t offset, const char* what) {
+    if (offset < 0) invalid(std::string(what) + ": negative offset " + std::to_string(offset));
+}
+
+// The largest count one ReadFile/WriteFile is asked for (a DWORD).
+constexpr std::size_t kMaxChunk = 1u << 30;
+
+// The handle behind a C runtime descriptor; EBADF (FileSystem) when `fd` is
+// not open, as on POSIX, rather than the C runtime's invalid-parameter abort.
+HANDLE handleOf(int fd, const char* action) {
+    HANDLE h;
+    {
+        win::QuietCrt quiet;
+        h = reinterpret_cast<HANDLE>(::_get_osfhandle(fd));
+    }
+    if (h == INVALID_HANDLE_VALUE || h == nullptr) fileError(fdName(fd), EBADF, action);
+    return h;
+}
+
+// An OVERLAPPED that names `offset`, for positioned I/O and the lock on a
+// synchronous handle.
+OVERLAPPED at(std::int64_t offset) {
+    OVERLAPPED ov{};
+    ov.Offset = static_cast<DWORD>(static_cast<std::uint64_t>(offset) & 0xffffffffu);
+    ov.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32);
+    return ov;
 }
 
 } // namespace
@@ -289,6 +323,133 @@ std::string cwd() {
 
 void chdir(const std::string& path) {
     if (::_wchdir(win::widen(path).c_str()) != 0) fileError(path, errno, "cannot change directory to");
+}
+
+// ------------------------------------------- positioned and durable operations
+
+int open(const std::string& path, const OpenOptions& options) {
+    const bool write = options.write || options.append;
+    if (!options.read && !write) invalid("cannot open " + path + ": neither read nor write was asked for");
+    if (options.exclusive && !options.create) invalid("cannot open " + path + ": exclusive needs create");
+    if (options.truncate && !write) invalid("cannot open " + path + ": truncate needs write");
+    int flags = options.read && write ? _O_RDWR : write ? _O_WRONLY : _O_RDONLY;
+    if (options.create) flags |= _O_CREAT;
+    if (options.exclusive) flags |= _O_EXCL;
+    if (options.truncate) flags |= _O_TRUNC;
+    if (options.append) flags |= _O_APPEND;
+    // options.permissions has no Windows meaning (the file gets its
+    // directory's inherited ACL), as for CPython's os.open.
+    const int fd = openPath(path, flags);
+    if (fd < 0) fileError(path, errno, "cannot open");
+    protoio::forget(fd);  // a stale state for a reused number must not survive
+    return fd;
+}
+
+std::string readAt(int fd, std::int64_t offset, std::size_t n) {
+    checkOffset(offset, "cannot read at");
+    const HANDLE h = handleOf(fd, "cannot read");
+    std::string out(n, '\0');
+    std::size_t done = 0;
+    while (done < n) {
+        OVERLAPPED ov = at(offset + static_cast<std::int64_t>(done));
+        DWORD got = 0;
+        if (!::ReadFile(h, out.data() + done, static_cast<DWORD>(std::min(n - done, kMaxChunk)), &got, &ov)) {
+            const DWORD e = ::GetLastError();
+            if (e == ERROR_HANDLE_EOF) break;  // the offset is at or past the end of the file
+            fileError(fdName(fd), win::errnoOfWin32(e), "cannot read");
+        }
+        if (got == 0) break;  // the end of the file
+        done += got;
+    }
+    out.resize(done);
+    return out;
+}
+
+void writeAt(int fd, std::int64_t offset, std::string_view data) {
+    checkOffset(offset, "cannot write at");
+    const HANDLE h = handleOf(fd, "cannot write");
+    std::size_t done = 0;
+    while (done < data.size()) {
+        OVERLAPPED ov = at(offset + static_cast<std::int64_t>(done));
+        DWORD put = 0;
+        if (!::WriteFile(h, data.data() + done, static_cast<DWORD>(std::min(data.size() - done, kMaxChunk)), &put, &ov))
+            fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot write");
+        done += put;
+    }
+}
+
+std::int64_t appendData(int fd, std::string_view data) {
+    // Valid under the one-appender contract: nobody else moves the end
+    // between this answer and the write. The C runtime's _O_APPEND seeks to
+    // the end before each _write, which is where this write lands.
+    std::int64_t start;
+    {
+        win::QuietCrt quiet;
+        start = ::_lseeki64(fd, 0, SEEK_END);
+    }
+    if (start < 0) fileError(fdName(fd), errno, "cannot append to");
+    std::size_t done = 0;
+    while (done < data.size()) {
+        const int w = ::_write(fd, data.data() + done, static_cast<unsigned>(std::min(data.size() - done, kMaxChunk)));
+        if (w < 0) fileError(fdName(fd), errno, "cannot append to");
+        done += static_cast<std::size_t>(w);
+    }
+    return start;
+}
+
+std::int64_t size(int fd) {
+    const HANDLE h = handleOf(fd, "cannot read the size of");
+    LARGE_INTEGER n{};
+    if (!::GetFileSizeEx(h, &n)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot read the size of");
+    return static_cast<std::int64_t>(n.QuadPart);
+}
+
+void truncate(int fd, std::int64_t newSize) {
+    if (newSize < 0) invalid("cannot truncate " + fdName(fd) + ": negative size " + std::to_string(newSize));
+    const HANDLE h = handleOf(fd, "cannot truncate");
+    FILE_END_OF_FILE_INFO info{};
+    info.EndOfFile.QuadPart = newSize;
+    if (!::SetFileInformationByHandle(h, FileEndOfFileInfo, &info, sizeof info))
+        fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot truncate");
+}
+
+void sync(int fd) {
+    const HANDLE h = handleOf(fd, "cannot sync");
+    if (!::FlushFileBuffers(h)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot sync");
+}
+
+void dataSync(int fd) { sync(fd); }  // FlushFileBuffers: Windows has no data-only flush
+
+void syncDirectory(const std::string&) {
+    // A directory cannot be flushed on Windows; ProtoBase's fsync_dir skips
+    // it there too.
+}
+
+void replace(const std::string& from, const std::string& to) { move(from, to); }
+
+// The lock is LockFileEx on byte 0, length 1: the region msvcrt.locking(fd,
+// LK_NBLCK, 1) locks at offset 0, which is what ProtoBase's OwnerLock takes.
+
+bool tryLock(int fd) {
+    const HANDLE h = handleOf(fd, "cannot lock");
+    OVERLAPPED ov = at(0);
+    if (::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) return true;
+    const DWORD e = ::GetLastError();
+    if (e == ERROR_LOCK_VIOLATION) return false;
+    fileError(fdName(fd), win::errnoOfWin32(e), "cannot lock");
+}
+
+void lock(int fd) {
+    const HANDLE h = handleOf(fd, "cannot lock");
+    OVERLAPPED ov = at(0);
+    if (!::LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov))
+        fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot lock");
+}
+
+void unlock(int fd) {
+    const HANDLE h = handleOf(fd, "cannot unlock");
+    OVERLAPPED ov = at(0);
+    if (!::UnlockFileEx(h, 0, 1, 0, &ov)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot unlock");
 }
 
 } // namespace protoio::file

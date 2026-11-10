@@ -13,6 +13,7 @@
 #include <system_error>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,6 +41,19 @@ void writeWhole(const std::string& path, const std::string& data, bool append) {
     }
     if (::close(fd) != 0 && errno != EINTR) fileError(path, errno, "cannot write");
 }
+
+// The name a descriptor goes by in an error message.
+std::string fdName(int fd) { return "descriptor " + std::to_string(fd); }
+
+[[noreturn]] void invalid(const std::string& message) { throw Error(Error::Kind::InvalidArgument, message); }
+
+void checkOffset(std::int64_t offset, const char* what) {
+    if (offset < 0) invalid(std::string(what) + ": negative offset " + std::to_string(offset));
+}
+
+// The largest count one read(2)/write(2) is asked for: Linux moves at most
+// 0x7ffff000 bytes per call anyway, and macOS refuses counts above INT_MAX.
+constexpr std::size_t kMaxChunk = 1u << 30;
 
 } // namespace
 
@@ -174,6 +188,140 @@ std::string cwd() {
 
 void chdir(const std::string& path) {
     if (::chdir(path.c_str()) != 0) fileError(path, errno, "cannot change directory to");
+}
+
+// ------------------------------------------- positioned and durable operations
+
+int open(const std::string& path, const OpenOptions& options) {
+    const bool write = options.write || options.append;
+    if (!options.read && !write) invalid("cannot open " + path + ": neither read nor write was asked for");
+    if (options.exclusive && !options.create) invalid("cannot open " + path + ": exclusive needs create");
+    if (options.truncate && !write) invalid("cannot open " + path + ": truncate needs write");
+    int flags = O_CLOEXEC | (options.read && write ? O_RDWR : write ? O_WRONLY : O_RDONLY);
+    if (options.create) flags |= O_CREAT;
+    if (options.exclusive) flags |= O_EXCL;
+    if (options.truncate) flags |= O_TRUNC;
+    if (options.append) flags |= O_APPEND;
+    int fd;
+    do fd = ::open(path.c_str(), flags, static_cast<mode_t>(options.permissions));
+    while (fd < 0 && errno == EINTR);
+    if (fd < 0) fileError(path, errno, "cannot open");
+    protoio::forget(fd);  // a stale state for a reused number must not survive
+    return fd;
+}
+
+std::string readAt(int fd, std::int64_t offset, std::size_t n) {
+    checkOffset(offset, "cannot read at");
+    std::string out(n, '\0');
+    std::size_t done = 0;
+    while (done < n) {
+        const ssize_t r = ::pread(fd, out.data() + done, std::min(n - done, kMaxChunk),
+                                  static_cast<off_t>(offset + static_cast<std::int64_t>(done)));
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) fileError(fdName(fd), errno, "cannot read");
+        if (r == 0) break;  // the end of the file
+        done += static_cast<std::size_t>(r);
+    }
+    out.resize(done);
+    return out;
+}
+
+void writeAt(int fd, std::int64_t offset, std::string_view data) {
+    checkOffset(offset, "cannot write at");
+    std::size_t done = 0;
+    while (done < data.size()) {
+        const ssize_t w = ::pwrite(fd, data.data() + done, std::min(data.size() - done, kMaxChunk),
+                                   static_cast<off_t>(offset + static_cast<std::int64_t>(done)));
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0) fileError(fdName(fd), errno, "cannot write");
+        done += static_cast<std::size_t>(w);
+    }
+}
+
+std::int64_t appendData(int fd, std::string_view data) {
+    // Valid under the one-appender contract: nobody else moves the end
+    // between this answer and the write.
+    const off_t start = ::lseek(fd, 0, SEEK_END);
+    if (start < 0) fileError(fdName(fd), errno, "cannot append to");
+    std::size_t done = 0;
+    while (done < data.size()) {
+        const ssize_t w = ::write(fd, data.data() + done, std::min(data.size() - done, kMaxChunk));
+        if (w < 0 && errno == EINTR) continue;
+        if (w < 0) fileError(fdName(fd), errno, "cannot append to");
+        done += static_cast<std::size_t>(w);
+    }
+    return static_cast<std::int64_t>(start);
+}
+
+std::int64_t size(int fd) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot read the size of");
+    return static_cast<std::int64_t>(st.st_size);
+}
+
+void truncate(int fd, std::int64_t newSize) {
+    if (newSize < 0) invalid("cannot truncate " + fdName(fd) + ": negative size " + std::to_string(newSize));
+    int r;
+    do r = ::ftruncate(fd, static_cast<off_t>(newSize));
+    while (r != 0 && errno == EINTR);
+    if (r != 0) fileError(fdName(fd), errno, "cannot truncate");
+}
+
+void sync(int fd) {
+    int r;
+    do r = ::fsync(fd);
+    while (r != 0 && errno == EINTR);
+    if (r != 0) fileError(fdName(fd), errno, "cannot sync");
+}
+
+void dataSync(int fd) {
+    int r;
+#if defined(__APPLE__)
+    do r = ::fsync(fd);  // macOS has no fdatasync
+    while (r != 0 && errno == EINTR);
+#else
+    do r = ::fdatasync(fd);
+    while (r != 0 && errno == EINTR);
+#endif
+    if (r != 0) fileError(fdName(fd), errno, "cannot sync");
+}
+
+void syncDirectory(const std::string& path) {
+    int fd;
+    do fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    while (fd < 0 && errno == EINTR);
+    if (fd < 0) fileError(path, errno, "cannot sync directory");
+    int r;
+    do r = ::fsync(fd);
+    while (r != 0 && errno == EINTR);
+    const int e = errno;
+    ::close(fd);
+    if (r != 0) fileError(path, e, "cannot sync directory");
+}
+
+void replace(const std::string& from, const std::string& to) { move(from, to); }
+
+bool tryLock(int fd) {
+    for (;;) {
+        if (::flock(fd, LOCK_EX | LOCK_NB) == 0) return true;
+        if (errno == EINTR) continue;
+        if (errno == EWOULDBLOCK) return false;
+        fileError(fdName(fd), errno, "cannot lock");
+    }
+}
+
+void lock(int fd) {
+    int r;
+    do r = ::flock(fd, LOCK_EX);
+    while (r != 0 && errno == EINTR);
+    if (r != 0) fileError(fdName(fd), errno, "cannot lock");
+}
+
+void unlock(int fd) {
+    int r;
+    do r = ::flock(fd, LOCK_UN);
+    while (r != 0 && errno == EINTR);
+    if (r != 0) fileError(fdName(fd), errno, "cannot unlock");
 }
 
 } // namespace protoio::file

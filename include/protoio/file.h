@@ -3,8 +3,10 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 // Files and directories. Every function may block. Failures throw
@@ -72,5 +74,89 @@ std::string tempDir();
 // The working directory, and changing it (process-wide).
 std::string cwd();
 void chdir(const std::string& path);
+
+// ------------------------------------------- positioned and durable operations
+//
+// The storage ground of the protoCore runtimes' databases (a port of
+// ProtoBase shares ProtoBase's on-disk directory with it). Failures throw as
+// above, with `sysErrno` set; an interrupted call (EINTR) is retried, and a
+// short read or write is continued. A negative offset or size throws
+// InvalidArgument. On Windows readAt and writeAt move the descriptor's file
+// position, so they do not mix with the stream functions on one descriptor.
+
+// The flags of open(2) that Mode cannot express.
+struct OpenOptions {
+    bool read = false, write = false;        // at least one; both: O_RDWR
+    bool create = false, exclusive = false;  // exclusive (O_EXCL, needs create): FileExists if present
+    bool truncate = false, append = false;   // truncate needs write; append implies write
+    int permissions = 0644;                  // for a created file; ignored on Windows
+};
+
+// Opens a file (close-on-exec, binary) and answers its descriptor. An
+// impossible combination (neither read nor write, exclusive without create,
+// truncate without write) throws InvalidArgument.
+int open(const std::string& path, const OpenOptions& options);
+
+// Up to `n` bytes at `offset` (pread); fewer only at the end of the file, and
+// none from the end on.
+std::string readAt(int fd, std::int64_t offset, std::size_t n);
+
+// Writes all of `data` at `offset` (pwrite), extending the file as needed.
+void writeAt(int fd, std::int64_t offset, std::string_view data);
+
+// Writes all of `data` at the end of a descriptor opened with `append`, and
+// answers the offset where it starts. Contract: ONE APPENDER PER DESCRIPTOR
+// at a time. The offset is the end of the file just before the write, and
+// neither POSIX nor the Windows C runtime (whose append is a seek and a
+// write) says atomically where an append landed, so concurrent appenders on
+// one descriptor, or other processes appending to the same file, are not
+// supported. Concurrent readAt calls are.
+std::int64_t appendData(int fd, std::string_view data);
+
+// The size of the file, in bytes (fstat; GetFileSizeEx).
+std::int64_t size(int fd);
+
+// Sets the size of the file (ftruncate), cutting it or extending it with zeros.
+void truncate(int fd, std::int64_t size);
+
+// Makes the file's data and metadata durable: fsync, FlushFileBuffers on
+// Windows. As CPython's os.fsync, on macOS it is plain fsync, not
+// F_FULLFSYNC, so the drive's own cache may still hold the data there.
+void sync(int fd);
+
+// Makes the file's data durable (and the metadata needed to read it back):
+// fdatasync on Linux, fsync on macOS, FlushFileBuffers on Windows. It is
+// never a no-op.
+void dataSync(int fd);
+
+// Makes the entries of a directory durable (created, renamed or removed
+// names): open(O_RDONLY), fsync, close. On Windows, where a directory cannot
+// be synced, it is a no-op, as ProtoBase's fsync_dir is; a missing directory
+// throws FileNotFound only on POSIX.
+void syncDirectory(const std::string& path);
+
+// Renames `from` to `to`, replacing an existing `to` atomically: the
+// semantics of CPython's os.replace (rename(2); on Windows a POSIX-semantics
+// rename, or MoveFileExW with MOVEFILE_REPLACE_EXISTING). It is `move`,
+// which already has them on every platform.
+void replace(const std::string& from, const std::string& to);
+
+// An exclusive, advisory, inter-process lock on the file of `fd`. On POSIX it
+// is flock(2); on Windows LockFileEx on byte 0, length 1. These are exactly
+// the locks ProtoBase's OwnerLock takes (fcntl.flock; msvcrt.locking at
+// offset 0, length 1), so each excludes the other. It is never a POSIX
+// record lock (fcntl F_SETLK), which on Linux is a separate lock family and
+// would not exclude ProtoBase. The lock belongs to the open file, not the
+// process: a second descriptor opened on the same file, even in this
+// process, does not get it. Take it once per descriptor (Windows does not
+// let one descriptor take it twice). On Windows the locked byte cannot be
+// read or written through another descriptor, so lock a dedicated file. The
+// lock is released by unlock or by closing the descriptor.
+
+// Takes the lock without waiting; false when another descriptor holds it.
+bool tryLock(int fd);
+// Takes the lock, waiting while another descriptor holds it.
+void lock(int fd);
+void unlock(int fd);
 
 } // namespace protoio::file

@@ -4,13 +4,19 @@
 #include "protoio/stream.h"
 #include "test_support.h"
 
+#include "protoio/process.h"
+
 #include <gtest/gtest.h>
+
+#include <chrono>
+#include <cstdint>
+#include <string>
+#include <thread>
 
 #ifdef _WIN32
 #include <algorithm>
 #include <filesystem>
 #include <io.h>
-#include "protoio/process.h"
 #else
 #include <unistd.h>
 #endif
@@ -240,4 +246,176 @@ TEST(File, ReopenedNumberStartsWithAFreshBuffer) {
     EXPECT_EQ(protoio::readLine(r2), "2a");
     EXPECT_EQ(protoio::readLine(r2), std::nullopt);
     protoio::close(r2);
+}
+
+// ------------------------------------------- positioned and durable operations
+
+namespace {
+
+file::OpenOptions readWriteCreate() {
+    return {.read = true, .write = true, .create = true};
+}
+
+} // namespace
+
+TEST(File, OpenOptions_ExclusiveRefusesExisting) {
+    TempDir d;
+    const file::OpenOptions excl{.write = true, .create = true, .exclusive = true};
+    const int fd = file::open(d / "x", excl);
+    protoio::close(fd);
+    EXPECT_EQ(kindOf([&] { file::open(d / "x", excl); }), Error::Kind::FileExists);
+}
+
+TEST(File, OpenOptions_MissingFileWithoutCreate) {
+    TempDir d;
+    EXPECT_EQ(kindOf([&] { file::open(d / "none", file::OpenOptions{.read = true}); }), Error::Kind::FileNotFound);
+}
+
+TEST(File, OpenOptions_TruncateAndKeep) {
+    TempDir d;
+    file::write(d / "t", "0123456789");
+    // Read-write without truncation keeps the contents.
+    int fd = file::open(d / "t", readWriteCreate());
+    EXPECT_EQ(file::size(fd), 10);
+    protoio::close(fd);
+    // With truncation it starts empty.
+    fd = file::open(d / "t", file::OpenOptions{.write = true, .truncate = true});
+    EXPECT_EQ(file::size(fd), 0);
+    protoio::close(fd);
+}
+
+TEST(File, ReadAt_WriteAt_RoundTrip) {
+    using namespace std::string_literals;
+    TempDir d;
+    const int fd = file::open(d / "rw", readWriteCreate());
+    file::writeAt(fd, 10, "abc\0def"s);
+    EXPECT_EQ(file::readAt(fd, 10, 7), "abc\0def"s);
+    EXPECT_EQ(file::size(fd), 17);
+    // The gap before offset 10 reads as zero bytes.
+    EXPECT_EQ(file::readAt(fd, 0, 10), std::string(10, '\0'));
+    protoio::close(fd);
+}
+
+TEST(File, ReadAt_PastEnd) {
+    TempDir d;
+    file::write(d / "p", "0123456789");
+    const int fd = file::open(d / "p", file::OpenOptions{.read = true});
+    const std::int64_t size = file::size(fd);
+    EXPECT_EQ(file::readAt(fd, size, 10), "");
+    EXPECT_EQ(file::readAt(fd, size + 100, 10), "");
+    EXPECT_EQ(file::readAt(fd, size - 2, 10).size(), 2u);
+    EXPECT_EQ(file::readAt(fd, size - 2, 10), "89");
+    EXPECT_EQ(kindOf([&] { file::readAt(fd, -1, 1); }), Error::Kind::InvalidArgument);
+    protoio::close(fd);
+}
+
+TEST(File, WriteAt_Large) {
+    TempDir d;
+    std::string data(64u << 20, '\0');
+    for (std::size_t i = 0; i < data.size(); ++i) data[i] = static_cast<char>((i * 131u + (i >> 12)) & 0xff);
+    const int fd = file::open(d / "big", readWriteCreate());
+    file::writeAt(fd, 4096, data);
+    EXPECT_EQ(file::size(fd), static_cast<std::int64_t>(4096 + data.size()));
+    EXPECT_TRUE(file::readAt(fd, 4096, data.size()) == data);
+    protoio::close(fd);
+}
+
+TEST(File, AppendData_AnswersStartOffset) {
+    TempDir d;
+    const int fd = file::open(d / "log", file::OpenOptions{.read = true, .write = true, .create = true, .append = true});
+    EXPECT_EQ(file::appendData(fd, "first"), 0);
+    EXPECT_EQ(file::appendData(fd, "second"), 5);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "firstsecond");
+    protoio::close(fd);
+}
+
+TEST(File, Truncate_Shrinks) {
+    TempDir d;
+    const int fd = file::open(d / "tr", readWriteCreate());
+    file::writeAt(fd, 0, "0123456789");
+    file::truncate(fd, 4);
+    EXPECT_EQ(file::size(fd), 4);
+    EXPECT_EQ(file::readAt(fd, 0, 100), "0123");
+    protoio::close(fd);
+    EXPECT_EQ(file::read(d / "tr"), "0123");
+}
+
+TEST(File, Sync_DataSync_SyncDirectory_DoNotThrow) {
+    TempDir d;
+    const int fd = file::open(d / "s", readWriteCreate());
+    file::writeAt(fd, 0, "durable");
+    EXPECT_NO_THROW(file::sync(fd));
+    EXPECT_NO_THROW(file::dataSync(fd));
+    EXPECT_NO_THROW(file::syncDirectory(d.path));
+    protoio::close(fd);
+}
+
+#ifndef _WIN32
+TEST(File, SyncDirectory_MissingPath) {
+    TempDir d;
+    EXPECT_EQ(kindOf([&] { file::syncDirectory(d / "missing"); }), Error::Kind::FileNotFound);
+}
+#endif
+
+TEST(File, Replace_OverwritesTarget) {
+    TempDir d;
+    file::write(d / "target", "old");
+    file::write(d / "source", "new");
+    file::replace(d / "source", d / "target");
+    EXPECT_EQ(file::read(d / "target"), "new");
+    EXPECT_FALSE(file::stat(d / "source"));
+}
+
+TEST(File, TryLock_SecondDescriptorSameProcess_False) {
+    TempDir d;
+    const int a = file::open(d / "lock", readWriteCreate());
+    const int b = file::open(d / "lock", readWriteCreate());
+    EXPECT_TRUE(file::tryLock(a));
+    EXPECT_FALSE(file::tryLock(b));
+    file::unlock(a);
+    EXPECT_TRUE(file::tryLock(b));
+    file::unlock(b);
+    // The blocking form takes a free lock at once.
+    file::lock(a);
+    EXPECT_FALSE(file::tryLock(b));
+    file::unlock(a);
+    protoio::close(a);
+    protoio::close(b);
+}
+
+// The lock must exclude ProtoBase's OwnerLock (proto_db/storage/ownerlock.py),
+// which a Python peer takes exactly as ProtoBase does.
+TEST(File, TryLock_ExcludesProtoBasePeer) {
+    bool havePython = false;
+    try {
+        havePython = protoio::process::run({"python3", "-c", "import sys; sys.exit(0)"}).exitCode == 0;
+    } catch (const Error&) {
+        havePython = false;
+    }
+    if (!havePython) GTEST_SKIP() << "python3 not found: ProtoBase lock interop NOT verified";
+
+    TempDir d;
+    const std::string lockPath = d / "owner.lock";
+    const std::string ready = d / "ready";
+    const std::string stop = d / "stop";
+    const int pid = protoio::process::spawn({"python3", PROTOIO_OWNERLOCK_PEER, lockPath, ready, stop});
+
+    bool isReady = false;
+    for (int i = 0; i < 200 && !isReady; ++i) {  // 10 s
+        if (file::stat(ready)) isReady = true;
+        else std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    if (!isReady) {
+        file::write(stop, "");
+        protoio::process::wait(pid);
+        FAIL() << "the ProtoBase lock peer did not report the lock within 10 s";
+    }
+
+    const int fd = file::open(lockPath, readWriteCreate());
+    EXPECT_FALSE(file::tryLock(fd)) << "the lock does not exclude ProtoBase's OwnerLock";
+    file::write(stop, "");
+    EXPECT_EQ(protoio::process::wait(pid), 0);
+    EXPECT_TRUE(file::tryLock(fd));
+    file::unlock(fd);
+    protoio::close(fd);
 }

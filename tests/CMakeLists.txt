@@ -70,3 +70,6 @@ protoio_test(test_file    file)
 protoio_test(test_process process)
 protoio_test(test_net     net)
 protoio_test(test_http    http)
+
+# The Python peer that takes ProtoBase's owner lock (TryLock_ExcludesProtoBasePeer).
+target_compile_definitions(test_file PRIVATE PROTOIO_OWNERLOCK_PEER="${CMAKE_CURRENT_SOURCE_DIR}/ownerlock_peer.py")
