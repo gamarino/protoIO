@@ -50,9 +50,10 @@ endif()
 # One binary per module, so the ThreadSanitizer run can pick the stream, net
 # and process suites by label.
 function(protoio_test name label)
-    add_executable(${name} ${name}.cpp test_support.cpp)
+    add_executable(${name} ${name}.cpp test_support.cpp vectors.cpp)
     target_link_libraries(${name} PRIVATE protoIO::protoio GTest::gtest_main)
     target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(${name} PRIVATE PROTOIO_VECTORS_DIR="${CMAKE_CURRENT_SOURCE_DIR}/vectors")
     target_compile_definitions(${name} PRIVATE PROTOIO_TEST_VERSION="${PROJECT_VERSION}")
     if(MSVC)
         target_compile_options(${name} PRIVATE /utf-8)
@@ -70,6 +71,7 @@ protoio_test(test_file    file)
 protoio_test(test_process process)
 protoio_test(test_net     net)
 protoio_test(test_http    http)
+protoio_test(test_encoding encoding)
 
 # The Python peer that takes ProtoBase's owner lock (TryLock_ExcludesProtoBasePeer).
 target_compile_definitions(test_file PRIVATE PROTOIO_OWNERLOCK_PEER="${CMAKE_CURRENT_SOURCE_DIR}/ownerlock_peer.py")
