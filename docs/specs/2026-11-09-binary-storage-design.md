@@ -117,6 +117,13 @@ Positioned and durable operations on a descriptor:
 | `void replace(const string& from, const string& to)` | `rename` | `MoveFileExW(REPLACE_EXISTING)` | `os.replace` semantics; existing `move` may already be this. Builder to reuse it. |
 | `bool tryLock(int fd)` / `void lock(int fd)` / `void unlock(int fd)` | `flock(LOCK_EX[\|LOCK_NB])` | `LockFileEx` on byte 0, length 1 (`FAIL_IMMEDIATELY` for `tryLock`) | **Must interoperate with ProtoBase's `ownerlock.py`**: `fcntl.flock` on POSIX, `msvcrt.locking(fd, LK_NBLCK, 1)` at offset 0 on Windows. Never POSIX record locks (`fcntl(F_SETLK)`): on Linux they are a different lock family and would not exclude ProtoBase. |
 
+Addendum (0.3.1): the one-appender contract is enforceable through
+`file::EndGuard` and the guarded overloads `appendData(fd, guard, data)`,
+`writeAt(fd, guard, offset, data)` and `truncate(fd, guard, size)`, moved
+from protoST's `BinaryFile`; a conflicting call throws the new
+`Error::Kind::Conflict`. See `include/protoio/file.h`. Every path argument
+holding a NUL byte throws `InvalidArgument` before any system call.
+
 Errors follow `file.h`'s existing mapping (FileNotFound, FileExists,
 FileSystem), with `sysErrno` set. Interrupted calls (`EINTR`) are retried.
 Short reads and writes are looped.

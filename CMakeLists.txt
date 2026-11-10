@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(protoIO
-    VERSION 0.3.0
+    VERSION 0.3.1
     DESCRIPTION "Shared input and output (files, processes, TCP, UDP, TLS, HTTP) for the protoCore runtimes"
     HOMEPAGE_URL "https://github.com/gamarino/protoIO"
     LANGUAGES CXX)
@@ -54,6 +54,7 @@ endif()
 
 add_library(protoio STATIC
     src/error.cpp
+    src/file_guard.cpp
     src/stream.cpp
     src/net.cpp
     src/http.cpp

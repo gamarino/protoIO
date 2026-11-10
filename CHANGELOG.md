@@ -5,6 +5,37 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.3.1 - not yet tagged
+
+### Added
+
+- `file::EndGuard`, moved from protoST's `BinaryFile` so every runtime gets
+  it: one atomic counter per open file object, compare-and-swap only (0 idle,
+  n > 0 extending writes in progress, -1 one append or truncate in
+  progress). Guarded overloads `appendData(fd, guard, data)` (exclusive),
+  `writeAt(fd, guard, offset, data)` (shared, and only when the write extends
+  the file) and `truncate(fd, guard, size)` (exclusive) refuse a conflicting
+  call with an Error and do nothing; every claim is released on every path.
+  `EndGuard::Claim` is the public RAII claim they use. The guard sees only the
+  callers sharing one `EndGuard` object. The unguarded overloads are
+  unchanged.
+- `Error::Kind::Conflict` (`kindName`: "Conflict"), appended after `Internal`:
+  an operation conflicts with one already in progress on the same object.
+  The guarded file operations throw it. A runtime that maps kinds with an
+  exhaustive `switch` must add a case.
+
+### Fixed
+
+- A string handed to the operating system as a C string no longer
+  truncates silently at an embedded NUL byte (`"a\0b"` used to open `"a"`).
+  File paths (every path argument of `protoio/file.h`), process arguments,
+  working directories, environment names and values, shell commands
+  (`protoio/process.h`), host names (`protoio/net.h`) and HTTP URLs
+  (`protoio/http.h`) are refused with `InvalidArgument` and a message naming
+  the function and the argument, before any system call. A redirect location
+  holding a NUL byte is a malformed response (`Network`). Data arguments
+  (file contents, process input, datagram and HTTP bodies) are unchanged.
+
 ## 0.3.0 - 2026-11-09
 
 ### Added

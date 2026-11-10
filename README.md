@@ -48,7 +48,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 |---|---|
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readBufferedLine(fd, max = 0)` (a line already buffered, never blocking), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
-| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir`, and the storage operations below |
+| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir`, and the storage operations below, including the end guard `EndGuard` |
 | `protoio/encoding.h` | `encoding::putUint`/`putInt`/`putFloat64`/`putFloat32` and `getUint`/`getInt`/`getFloat64`/`getFloat32` (widths 1, 2, 4, 8; either byte order; as CPython's `struct`), `base64Encode`, `base64Decode` |
 | `protoio/digest.h` | `digest::crc32` (chainable), `crc32Combine`, `blake2b(data, digestSize, key)`, `sha256`, `hmacSha256`, and the incremental `Blake2b` and `Sha256` classes; byte-compatible with CPython's `zlib` and `hashlib` |
 | `protoio/msgpack.h` | `msgpack::Writer` (smallest encodings, as msgpack-python's `packb(use_bin_type=True)`), `Handler` (events for a runtime to build its own objects), `read(data, handler, Limits)`, `Limits {maxDepth, maxElements, strictMapKeys}` |
@@ -69,6 +69,19 @@ on-disk directory with them). Contracts worth knowing:
   starts, which is only well defined with a single appender at a time.
   Concurrent `readAt` calls on the same descriptor are safe. `writeAt` on an
   append descriptor throws `InvalidArgument`.
+- **End guard** (0.3.1): `file::EndGuard` makes a violation of that contract
+  fail loudly instead of corrupting offsets. The overloads
+  `appendData(fd, guard, data)`, `writeAt(fd, guard, offset, data)` and
+  `truncate(fd, guard, size)` claim it: `appendData` and `truncate`
+  exclusively, a `writeAt` that extends the file shared (any number of them
+  at once), a `writeAt` inside the file not at all. A conflicting call throws
+  `Conflict` and does nothing; claims are released on every path. It is one
+  atomic counter, compare-and-swap only, no lock and no waiting. It guards
+  only the callers that share the same `EndGuard` object, not other
+  descriptors, other guards or other processes: a runtime keeps one beside
+  each file object it exposes. `EndGuard::Claim` (RAII) is public, for a
+  runtime's own operations that move the end and for deterministic tests.
+  The overloads without a guard remain and check nothing.
 - `syncDirectory` is a no-op on Windows, where a directory cannot be synced.
 - The lock interoperates with ProtoBase: `flock` on POSIX, `LockFileEx` on
   byte 0 (length 1) on Windows, so each excludes the other. It belongs to the
@@ -164,6 +177,16 @@ or 0 when there was none.
 | `BodyTooLarge` | an HTTP body over the given limit |
 | `InvalidArgument` | a refused value: a header with a line break, a bad URL, an empty argv |
 | `Internal` | a failure inside a library protoIO relies on (OpenSSL), caused neither by the caller nor by the environment |
+| `Conflict` | an operation conflicts with one already in progress on the same object (an `appendData` or `truncate` meeting another call that moves the end of the file on the same `file::EndGuard`) |
+
+A string the library hands to the operating system as a C string (a file
+path, a host name, a URL, a program argument, a working directory, an
+environment variable's name or value, a shell command) throws
+`InvalidArgument` when it holds a NUL byte, before any system call: the
+system would read it only up to that byte, so `"a\0b"` would name `"a"`. The
+message names the function and the argument, e.g. `file::open: the path
+contains a NUL byte`. Data arguments (file contents, process input, datagram
+and HTTP bodies) may hold NUL bytes.
 
 ## Build, test, install
 
@@ -180,7 +203,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack' --output-on-failure
 
-# Debian package: protoio-dev_0.3.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.3.1_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
