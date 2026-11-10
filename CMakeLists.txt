@@ -61,6 +61,7 @@ add_library(protoio STATIC
     src/crc32.cpp
     src/blake2b.cpp
     src/sha.cpp
+    src/msgpack.cpp
     ${PROTOIO_PLATFORM_SOURCES}
 )
 add_library(protoIO::protoio ALIAS protoio)
