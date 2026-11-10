@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <string>
+#include <string_view>
 #include <vector>
 
 using namespace protoio;
@@ -253,9 +255,10 @@ TEST(Msgpack, Reader_HugeDeclaredLength) {
     EXPECT_EQ(h.events, 0);
 
     // The same for str32, ext32, array32 and map32.
-    for (const char* head : {"\xdb\xff\xff\xff\xff", "\xc9\xff\xff\xff\xff\x01", "\xdd\xff\xff\xff\xff",
-                             "\xdf\xff\xff\xff\xff"}) {
-        std::string d = std::string(head) + std::string(10, '\x00');
+    for (const std::string_view head :
+         {std::string_view("\xdb\xff\xff\xff\xff", 5), std::string_view("\xc9\xff\xff\xff\xff\x01", 6),
+          std::string_view("\xdd\xff\xff\xff\xff", 5), std::string_view("\xdf\xff\xff\xff\xff", 5)}) {
+        std::string d = std::string(head.data(), head.size()) + std::string(10, '\x00');
         CountingHandler c;
         expectInvalid([&] { msgpack::read(d, c); });
         EXPECT_EQ(c.events, 0) << hex(head);
@@ -364,6 +367,9 @@ TEST(Msgpack, Reader_Float32Widened) {
     CountingHandler n;
     msgpack::read(std::string_view("\xca\x7f\xc0\x01\x23", 5), n);  // NaN with payload
     EXPECT_TRUE(std::isnan(n.lastFloat));
+    // Widened exactly: the quiet bit and the payload move to the top of the
+    // 52-bit mantissa (0x400123 << 29).
+    EXPECT_EQ(std::bit_cast<uint64_t>(n.lastFloat), 0x7ff8002460000000ull);
     CountingHandler z;
     msgpack::read(std::string_view("\xca\x80\x00\x00\x00", 5), z);  // -0.0f
     EXPECT_EQ(std::bit_cast<uint64_t>(z.lastFloat), std::bit_cast<uint64_t>(-0.0));

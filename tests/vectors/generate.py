@@ -84,9 +84,12 @@ def gen_blake2b():
                 h = hashlib.blake2b(m, digest_size=size, key=key)
                 rows.append({"data": m.hex(), "key": key.hex(), "size": size,
                              "digest": h.hexdigest()})
-    # RFC 7693 Appendix A: BLAKE2b-512("abc"), no key.
-    rfc = hashlib.blake2b(b"abc").hexdigest()
-    assert rfc.startswith("ba80a53f981c4d0d6a2797b69f12f6e9"), rfc
+    # RFC 7693 Appendix A: BLAKE2b-512("abc"), no key. The whole digest, and
+    # it must be one of the rows the C++ tests check.
+    rfc = ("ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1"
+           "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923")
+    assert hashlib.blake2b(b"abc").hexdigest() == rfc
+    assert {"data": b"abc".hex(), "key": "", "size": 64, "digest": rfc} in rows
     write("blake2b.json", rows)
 
 
@@ -212,6 +215,19 @@ def ext(code, data):
     return V(msgpack.ExtType(code, data), {"t": "ext", "type": code, "v": data.hex()})
 
 
+def f64_bits(tree):
+    """The bit patterns (hex) of every float64 in a value tree."""
+    if tree.get("t") == "f64":
+        yield tree["bits"]
+    elif tree.get("t") == "array":
+        for item in tree["v"]:
+            yield from f64_bits(item)
+    elif tree.get("t") == "map":
+        for key, value in tree["v"]:
+            yield from f64_bits(key)
+            yield from f64_bits(value)
+
+
 def gen_msgpack():
     rows = []
 
@@ -221,6 +237,10 @@ def gen_msgpack():
         back = msgpack.unpackb(packed, raw=False, strict_map_key=False)
         if not (isinstance(back, float) and math.isnan(back)):
             assert back == v.py or isinstance(v.py, msgpack.ExtType), desc
+        # Every float64 is packed with its exact bit pattern (NaN payloads
+        # included), which == above cannot check.
+        for bits in f64_bits(v.tree):
+            assert bytes.fromhex(bits) in packed, (desc, bits)
         rows.append({"description": desc, "bytes": packed.hex(), "value": v.tree})
 
     add("nil", nil())
