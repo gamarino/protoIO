@@ -67,7 +67,12 @@ std::string hmacSha256(std::string_view key, std::string_view data) {
         OSSL_PARAM_construct_end()};
     unsigned char out[EVP_MAX_MD_SIZE];
     size_t n = 0;
-    if (EVP_MAC_init(ctx.get(), reinterpret_cast<const unsigned char*>(key.data()), key.size(), params) != 1 ||
+    // EVP_MAC_init treats a null key pointer as "no key set" and fails, but an
+    // empty key is valid HMAC input; a default-constructed string_view has a
+    // null data(), so hand OpenSSL a non-null pointer with length 0.
+    static const unsigned char kNoKey[1] = {0};
+    const unsigned char* keyPtr = key.empty() ? kNoKey : reinterpret_cast<const unsigned char*>(key.data());
+    if (EVP_MAC_init(ctx.get(), keyPtr, key.size(), params) != 1 ||
         EVP_MAC_update(ctx.get(), reinterpret_cast<const unsigned char*>(data.data()), data.size()) != 1 ||
         EVP_MAC_final(ctx.get(), out, &n, sizeof out) != 1)
         fail(Error::Kind::Network, "hmac: OpenSSL computation failed");

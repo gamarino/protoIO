@@ -176,3 +176,26 @@ TEST(Hmac, MatchesCPython) {
     }
     EXPECT_GT(n, 3);
 }
+
+TEST(Hmac, HmacSha256_EmptyKeyDefaultConstructed) {
+    EXPECT_EQ(hexOf(hmacSha256(std::string_view(), "abc")),
+              "fd7adb152c05ef80dccf50a1fa4c05d5a3ec6da95575fc312ae7c5d091836351");
+    EXPECT_EQ(hexOf(hmacSha256(std::string_view(), std::string_view())),
+              "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad");
+    EXPECT_EQ(hmacSha256("", "abc"), hmacSha256(std::string_view(), "abc"));
+}
+
+TEST(Sha256, NullDataViewsAreEmpty) {
+    const char* empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    EXPECT_EQ(hexOf(sha256(std::string_view())), empty);
+    Sha256 h;
+    h.update(std::string_view());
+    EXPECT_EQ(hexOf(h.finish()), empty);
+}
+
+TEST(Blake2b, NullDataViewsAreEmpty) {
+    EXPECT_EQ(blake2b(std::string_view()), blake2b(""));
+    Blake2b h(8, std::string_view());
+    h.update(std::string_view());
+    EXPECT_EQ(h.finish(), blake2b("", 8));
+}
