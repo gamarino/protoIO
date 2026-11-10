@@ -7,6 +7,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstring>
+#include <optional>
 #include <random>
 
 using namespace protoio::digest;
@@ -124,9 +126,10 @@ TEST(Blake2b, Incremental_EqualsOneShot) {
 
 TEST(Blake2b, BadParams) {
     using protoio::Error;
-    auto kind = [](auto f) {
+    auto kind = [](auto f) -> std::optional<Error::Kind> {
         try { f(); } catch (const Error& e) { return e.kind; }
-        return Error::Kind::Network;
+        ADD_FAILURE() << "expected protoio::Error, nothing was thrown";
+        return std::nullopt;
     };
     EXPECT_EQ(kind([] { blake2b("x", 0); }), Error::Kind::InvalidArgument);
     EXPECT_EQ(kind([] { blake2b("x", 65); }), Error::Kind::InvalidArgument);
@@ -198,4 +201,10 @@ TEST(Blake2b, NullDataViewsAreEmpty) {
     Blake2b h(8, std::string_view());
     h.update(std::string_view());
     EXPECT_EQ(h.finish(), blake2b("", 8));
+}
+
+// OpenSSL internal failures are Kind::Internal; its name is part of the
+// mapping tables the runtimes build.
+TEST(ErrorKind, InternalHasAName) {
+    EXPECT_STREQ(protoio::kindName(protoio::Error::Kind::Internal), "Internal");
 }

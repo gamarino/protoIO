@@ -22,7 +22,12 @@ std::string blake2b(std::string_view data, int digestSize = 64, std::string_view
 std::string sha256(std::string_view data);
 std::string hmacSha256(std::string_view key, std::string_view data);
 
-// Incremental forms for large inputs.
+// Incremental forms for large inputs. finish() ends one; a second finish()
+// or an update() after it throws InvalidArgument. A moved-from object must
+// not be used (only destroyed or assigned to).
+//
+// The OpenSSL-backed functions (sha256, hmacSha256, Sha256) report a failure
+// inside OpenSSL, which is practically unreachable, as Error::Kind::Internal.
 class Blake2b {
 public:
     Blake2b(int digestSize = 64, std::string_view key = {});

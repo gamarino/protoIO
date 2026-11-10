@@ -25,6 +25,8 @@ struct Error : std::runtime_error {
         LineTooLong,         // a line exceeded the limit the caller gave
         BodyTooLarge,        // an HTTP body exceeded the limit the caller gave
         InvalidArgument,     // a value the library refuses (e.g. a header with a line break)
+        Internal,            // a failure inside a library protoIO relies on (e.g. OpenSSL),
+                             // caused neither by the caller nor by the environment
     };
 
     Kind kind;

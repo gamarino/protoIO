@@ -20,6 +20,7 @@ const char* kindName(Error::Kind kind) noexcept {
         case Error::Kind::LineTooLong: return "LineTooLong";
         case Error::Kind::BodyTooLarge: return "BodyTooLarge";
         case Error::Kind::InvalidArgument: return "InvalidArgument";
+        case Error::Kind::Internal: return "Internal";
     }
     return "Unknown";
 }

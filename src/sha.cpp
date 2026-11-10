@@ -25,7 +25,7 @@ struct Sha256::Impl {
     bool finished = false;
     Impl() {
         if (!ctx || EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1)
-            fail(Error::Kind::Network, "sha256: OpenSSL initialisation failed");
+            fail(Error::Kind::Internal, "sha256: OpenSSL initialisation failed");
     }
 };
 
@@ -37,7 +37,7 @@ Sha256& Sha256::operator=(Sha256&&) noexcept = default;
 void Sha256::update(std::string_view data) {
     if (impl_->finished) fail(Error::Kind::InvalidArgument, "sha256: update after finish");
     if (EVP_DigestUpdate(impl_->ctx.get(), data.data(), data.size()) != 1)
-        fail(Error::Kind::Network, "sha256: OpenSSL update failed");
+        fail(Error::Kind::Internal, "sha256: OpenSSL update failed");
 }
 
 std::string Sha256::finish() {
@@ -46,7 +46,7 @@ std::string Sha256::finish() {
     unsigned char out[EVP_MAX_MD_SIZE];
     unsigned int n = 0;
     if (EVP_DigestFinal_ex(impl_->ctx.get(), out, &n) != 1)
-        fail(Error::Kind::Network, "sha256: OpenSSL finalisation failed");
+        fail(Error::Kind::Internal, "sha256: OpenSSL finalisation failed");
     return std::string(reinterpret_cast<char*>(out), n);
 }
 
@@ -58,9 +58,9 @@ std::string sha256(std::string_view data) {
 
 std::string hmacSha256(std::string_view key, std::string_view data) {
     std::unique_ptr<EVP_MAC, MacDeleter> mac{EVP_MAC_fetch(nullptr, "HMAC", nullptr)};
-    if (!mac) fail(Error::Kind::Network, "hmac: HMAC not available in OpenSSL");
+    if (!mac) fail(Error::Kind::Internal, "hmac: HMAC not available in OpenSSL");
     std::unique_ptr<EVP_MAC_CTX, MacCtxDeleter> ctx{EVP_MAC_CTX_new(mac.get())};
-    if (!ctx) fail(Error::Kind::Network, "hmac: OpenSSL context allocation failed");
+    if (!ctx) fail(Error::Kind::Internal, "hmac: OpenSSL context allocation failed");
     char digestName[] = "SHA256";
     OSSL_PARAM params[2] = {
         OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST, digestName, 0),
@@ -75,7 +75,7 @@ std::string hmacSha256(std::string_view key, std::string_view data) {
     if (EVP_MAC_init(ctx.get(), keyPtr, key.size(), params) != 1 ||
         EVP_MAC_update(ctx.get(), reinterpret_cast<const unsigned char*>(data.data()), data.size()) != 1 ||
         EVP_MAC_final(ctx.get(), out, &n, sizeof out) != 1)
-        fail(Error::Kind::Network, "hmac: OpenSSL computation failed");
+        fail(Error::Kind::Internal, "hmac: OpenSSL computation failed");
     return std::string(reinterpret_cast<char*>(out), n);
 }
 
