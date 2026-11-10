@@ -262,8 +262,8 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n) {
 
 void writeAt(int fd, std::int64_t offset, std::string_view data) {
     checkOffset(offset, "cannot write at");
-    // pwrite ignores the offset of an O_APPEND descriptor on Linux (and
-    // appends), but honours it elsewhere: refused on every platform.
+    // pwrite may append and ignore the offset on an O_APPEND descriptor
+    // (Linux does; other systems may): refused on every platform.
     const int fl = ::fcntl(fd, F_GETFL);
     if (fl < 0) fileError(fdName(fd), errno, "cannot write");
     if (fl & O_APPEND) invalid("cannot write at an offset of " + fdName(fd) + ": it was opened to append");
@@ -283,12 +283,19 @@ std::int64_t appendData(int fd, std::string_view data) {
     // between this answer and the write. The write names its offset (pwrite)
     // and never uses the file position, which a stream read or write on the
     // same descriptor moves, as file_win.cpp does. On an O_APPEND descriptor
-    // Linux's pwrite appends and ignores the offset (other systems honour
-    // it); under the contract the end is `start` + what was written so far,
-    // so the bytes land at the same place either way. The end is read with
-    // fstat, not lseek(SEEK_END), so the file position is not moved either.
+    // pwrite may append and ignore the offset (Linux does; other systems
+    // may). Either way the bytes land at `start` + what was written so far:
+    // under the contract that offset IS the end of the file, so appending
+    // there and writing there are the same. The end is read with fstat, not
+    // lseek(SEEK_END), so the file position is not moved either.
     struct stat st{};
     if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot append to");
+    // Only a regular file has an end fstat reports: a block device reports
+    // size 0 (the append would overwrite its first bytes), and a pipe, FIFO,
+    // socket or terminal has no offsets at all. Refused before any write.
+    if (!S_ISREG(st.st_mode))
+        throw Error(Error::Kind::FileSystem,
+                    "cannot append to " + fdName(fd) + ": not a regular file (appendData needs one)", ESPIPE);
     const off_t start = st.st_size;
     std::size_t done = 0;
     while (done < data.size()) {

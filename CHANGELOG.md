@@ -50,11 +50,17 @@ A minor release: new API, a new `Error::Kind` value and a changed answer of
   prefix. Existence predicates built on it now answer false, as the JVM's
   `File.exists()` and Python's `os.path.exists` do.
 - POSIX `appendData` reads the end with `fstat` and writes with `pwrite` at
-  that offset, as the Windows version does: it no longer moves the file
-  position, and a stream read or write on the same descriptor can no longer
-  redirect its bytes. On an `append` descriptor Linux's `pwrite` appends
-  regardless of the offset, which under the one-appender contract is the
-  same place.
+  that offset, as the Windows version does: a stream read or write on the
+  same descriptor can no longer redirect its bytes, and on POSIX it no
+  longer moves the file position (on Windows the positioned `WriteFile`
+  still does). On an `append` descriptor `pwrite` may append regardless of
+  the offset (Linux does; other systems may), which under the one-appender
+  contract is the same place.
+- `appendData` (guarded and unguarded, POSIX and Windows) refuses a
+  descriptor that is not a regular file with `FileSystem` (`sysErrno`
+  ESPIPE) before writing anything. Pipes, sockets and terminals already
+  failed; a block device, whose `fstat` size is 0, would otherwise have been
+  written over from offset 0.
 
 ### Upgrading
 

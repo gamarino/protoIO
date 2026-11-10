@@ -184,7 +184,7 @@ or 0 when there was none.
 | `BodyTooLarge` | an HTTP body over the given limit |
 | `InvalidArgument` | a refused value: a header with a line break, a bad URL, an empty argv |
 | `Internal` | a failure inside a library protoIO relies on (OpenSSL), caused neither by the caller nor by the environment |
-| `Conflict` | an operation conflicts with one already in progress on the same object (an `appendData` or `truncate` meeting another call that moves the end of the file on the same `file::EndGuard`) |
+| `Conflict` | an operation conflicts with one already in progress on the same object: on one `file::EndGuard`, an `appendData` meeting another append, a truncate or an extending write; a `truncate` meeting any other guarded call; a guarded `writeAt` meeting a truncate, or, when it extends the file, an append |
 
 A string the library hands to the operating system as a C string (a file
 path, a host name, a URL, a program argument, a working directory, an

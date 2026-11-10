@@ -432,6 +432,12 @@ std::int64_t appendData(int fd, std::string_view data) {
     // the end, then a write at the pointer) could land in the middle of the
     // file.
     const HANDLE h = handleOf(fd, "cannot append to");
+    // Only a regular file, as on POSIX: a pipe or a console has no offsets.
+    // (A volume or physical-disk handle is FILE_TYPE_DISK too, but
+    // GetFileSizeEx fails on it below, before any write.)
+    if (::GetFileType(h) != FILE_TYPE_DISK)
+        throw Error(Error::Kind::FileSystem,
+                    "cannot append to " + fdName(fd) + ": not a regular file (appendData needs one)", ESPIPE);
     LARGE_INTEGER end{};
     if (!::GetFileSizeEx(h, &end)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot append to");
     const std::int64_t start = static_cast<std::int64_t>(end.QuadPart);

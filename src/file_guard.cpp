@@ -26,6 +26,11 @@ constexpr std::uint64_t kCountMask = (std::uint64_t{1} << 31) - 1;
 constexpr std::uint64_t kExtendUnit = std::uint64_t{1} << kExtendShift;
 constexpr std::uint64_t kInsideUnit = std::uint64_t{1} << kInsideShift;
 constexpr std::uint64_t kExtendMask = kCountMask << kExtendShift;
+// Two 31-bit counts fill the word exactly: Extend in bits 2..32, Inside in
+// 33..63. A count would overflow (Extend into Inside, Inside out of the
+// word) only with 2^31 claims held at once; a Claim is non-movable RAII,
+// each held by its own call frame or object, so that is not reachable.
+static_assert(kExtendShift + 31 == kInsideShift && kInsideShift + 31 == 64, "the guard's fields fill the word");
 
 std::uint64_t unitOf(EndGuard::Use use) {
     switch (use) {

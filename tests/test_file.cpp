@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #ifdef _WIN32
 #include <algorithm>
 #include <filesystem>
+#include <fcntl.h>
 #include <io.h>
 #else
 #include <unistd.h>
@@ -978,29 +980,71 @@ TEST(File, EndGuard_GuardsOnlyItsOwnCallers) {
     protoio::close(fd);
 }
 
-// appendData writes at the end it read, never at the file position: moving
-// the position (a stream read) does not redirect the bytes, on a plain and on
-// an append descriptor (where Linux's pwrite appends regardless of the
-// offset, which under the contract is the same place).
+// appendData writes at the end it read, never at the file position, on a
+// plain and on an append descriptor (where pwrite may append regardless of
+// the offset, which under the contract is the same place). The file is
+// larger than the stream's read-ahead buffer, so the first readLine leaves
+// the file position in the middle of the file: a seek to the end or a write
+// at the position (the code before 0.4.0) would make the stream skip the
+// bytes between. That half is POSIX only: on Windows the positioned
+// WriteFile moves the file position by design (see file.h), so stream
+// functions and appendData do not mix on one descriptor there.
 TEST(File, AppendData_IgnoresTheFilePosition) {
     TempDir d;
+    std::string content;
+    for (int i = 0; content.size() < 200000; ++i) content += "line" + std::to_string(i) + "\n";
+    const auto end = static_cast<std::int64_t>(content.size());
     for (const bool appendMode : {false, true}) {
         const std::string name = d / (appendMode ? "append" : "plain");
-        file::write(name, "line1\nline2\n");
+        file::write(name, content);
         const int fd = file::open(name, file::OpenOptions{.read = true, .write = true, .append = appendMode});
-        EXPECT_EQ(protoio::readLine(fd), "line1");  // moves the file position
-        EXPECT_EQ(file::appendData(fd, "XY"), 12) << name;
-        EXPECT_EQ(file::appendData(fd, "Z"), 14) << name;
-        EXPECT_EQ(file::readAt(fd, 0, 100), "line1\nline2\nXYZ") << name;
-        EXPECT_EQ(protoio::readLine(fd), "line2");  // the stream is undisturbed
+        EXPECT_EQ(protoio::readLine(fd), "line0");  // reads ahead: the position is now mid-file
+        EXPECT_EQ(file::appendData(fd, "XY"), end) << name;
+        EXPECT_EQ(file::appendData(fd, "Z"), end + 2) << name;
+        EXPECT_EQ(file::readAt(fd, end - 3, 100), content.substr(content.size() - 3) + "XYZ") << name;
 #ifndef _WIN32
-        // Nor does it move the position: no lseek(SEEK_END), no write(2).
+        const off_t pos = ::lseek(fd, 0, SEEK_CUR);
+        EXPECT_GT(pos, 0) << name;
+        EXPECT_LT(pos, end) << name;  // the read-ahead stopped mid-file
+        // The stream goes on from where it was, through the appended bytes.
+        EXPECT_TRUE(protoio::readAll(fd) == content.substr(6) + "XYZ") << name;
+        // appendData did not move the position: neither lseek(SEEK_END) nor write(2).
         ASSERT_EQ(::lseek(fd, 3, SEEK_SET), 3);
-        EXPECT_EQ(file::appendData(fd, "W"), 15) << name;
+        EXPECT_EQ(file::appendData(fd, "W"), end + 3) << name;
         EXPECT_EQ(::lseek(fd, 0, SEEK_CUR), 3) << name;
 #endif
         protoio::close(fd);
     }
+}
+
+// appendData needs a regular file: a pipe (no offsets; a block device,
+// whose fstat size is 0, is refused by the same check) throws FileSystem
+// before anything is written, guarded or not, and the claim is released.
+TEST(File, AppendData_RefusesANonRegularFile) {
+    int fds[2];
+#ifdef _WIN32
+    ASSERT_EQ(::_pipe(fds, 4096, _O_BINARY), 0);
+#else
+    ASSERT_EQ(::pipe(fds), 0);
+#endif
+    protoio::forget(fds[0]);
+    protoio::forget(fds[1]);
+    file::EndGuard g;
+    for (const bool guarded : {false, true}) {
+        try {
+            if (guarded) file::appendData(fds[1], g, "data");
+            else file::appendData(fds[1], "data");
+            ADD_FAILURE() << "no Error was thrown";
+        } catch (const Error& e) {
+            EXPECT_EQ(e.kind, Error::Kind::FileSystem) << e.what();
+            EXPECT_EQ(e.sysErrno, ESPIPE);
+            EXPECT_NE(std::string(e.what()).find("not a regular file"), std::string::npos) << e.what();
+        }
+    }
+    EXPECT_TRUE(g.state().idle());
+    protoio::close(fds[1]);  // the reader sees the end at once: nothing was written
+    EXPECT_EQ(protoio::readAll(fds[0]), "");
+    protoio::close(fds[0]);
 }
 
 // Racing appenders on one guard: whatever the interleaving, each call either

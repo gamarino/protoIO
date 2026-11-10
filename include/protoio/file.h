@@ -91,8 +91,10 @@ void chdir(const std::string& path);
 // above, with `sysErrno` set; an interrupted call (EINTR) is retried, and a
 // short read or write is continued, and a write that makes no progress
 // throws FileSystem (EIO) instead of looping. A negative offset or size
-// throws InvalidArgument. On Windows readAt and writeAt move the descriptor's file
-// position, so they do not mix with the stream functions on one descriptor.
+// throws InvalidArgument. On Windows readAt, writeAt and appendData move the
+// descriptor's file position (a positioned WriteFile or ReadFile on a
+// synchronous handle updates it), so they do not mix with the stream
+// functions on one descriptor there.
 
 // The flags of open(2) that Mode cannot express.
 struct OpenOptions {
@@ -115,20 +117,25 @@ std::string readAt(int fd, std::int64_t offset, std::size_t n);
 
 // Writes all of `data` at `offset` (pwrite), extending the file as needed. A
 // descriptor opened with `append` (OpenOptions::append or Mode::Append)
-// throws InvalidArgument on every platform: Linux would append and ignore
-// the offset. On Windows protoIO recognizes only append descriptors it
+// throws InvalidArgument on every platform: Linux's pwrite (and possibly
+// others') would append and ignore the offset. On Windows protoIO recognizes only append descriptors it
 // opened itself.
 void writeAt(int fd, std::int64_t offset, std::string_view data);
 
-// Writes all of `data` at the end of a writable descriptor and answers the
-// offset where it starts. The descriptor may be opened with `append` or not:
-// appendData reads the end first (fstat; GetFileSizeEx) and then
-// writes at that offset (pwrite; WriteFile with an OVERLAPPED offset), never
-// at the file position, so stream reads or writes on the same descriptor
-// cannot redirect the bytes. On an `append` descriptor Linux's pwrite
-// appends and ignores the offset; under the contract below the end is the
-// offset it read, so the bytes land there all the same. Concurrent readAt and
-// writeAt calls are positioned and do not use the file position.
+// Writes all of `data` at the end of a regular file open for writing and
+// answers the offset where it starts. The descriptor may be opened with
+// `append` or not. Any other descriptor (a pipe, FIFO, socket, terminal,
+// console, or a block device, whose fstat size is 0) throws FileSystem
+// (sysErrno ESPIPE) before anything is written. appendData reads the end
+// first (fstat; GetFileSizeEx) and then writes at that offset (pwrite;
+// WriteFile with an OVERLAPPED offset), never at the file position, so
+// stream reads or writes on the same descriptor cannot redirect the bytes.
+// On POSIX it also leaves the file position where it was; on Windows the
+// positioned WriteFile moves it (see above). On an `append` descriptor
+// pwrite may append and ignore the offset (Linux does; other systems may);
+// under the contract below the end is the offset it read, so the bytes land
+// there either way. Concurrent readAt and writeAt calls are positioned and
+// do not use the file position.
 //
 // Contract: ONE APPENDER PER DESCRIPTOR at a time, and nothing else may move
 // the end of the file during the call (a writeAt past the end, a truncate).
