@@ -67,6 +67,8 @@ on-disk directory with them). Contracts worth knowing:
 - `readAt` answers fewer bytes than asked only at the end of the file.
 - One appender per descriptor: `appendData` answers the offset where the data
   starts, which is only well defined with a single appender at a time.
+  Concurrent `readAt` calls on the same descriptor are safe. `writeAt` on an
+  append descriptor throws `InvalidArgument`.
 - `syncDirectory` is a no-op on Windows, where a directory cannot be synced.
 - The lock interoperates with ProtoBase: `flock` on POSIX, `LockFileEx` on
   byte 0 (length 1) on Windows, so each excludes the other. It belongs to the
@@ -161,6 +163,7 @@ or 0 when there was none.
 | `LineTooLong` | a line over the given limit |
 | `BodyTooLarge` | an HTTP body over the given limit |
 | `InvalidArgument` | a refused value: a header with a line break, a bad URL, an empty argv |
+| `Internal` | a failure inside a library protoIO relies on (OpenSSL), caused neither by the caller nor by the environment |
 
 ## Build, test, install
 
@@ -172,12 +175,12 @@ cmake -S . -B build_release -DCMAKE_BUILD_TYPE=Release
 cmake --build build_release -j4
 ctest --test-dir build_release --output-on-failure      # sequential
 
-# ThreadSanitizer (stream, net and process suites)
+# ThreadSanitizer (every suite with threads or shared state)
 cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
-setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process' --output-on-failure
+setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack' --output-on-failure
 
-# Debian package: protoio-dev_0.2.3_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.3.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -356,7 +359,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.2 CONFIG QUIET)
+find_package(protoIO 0.3 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.

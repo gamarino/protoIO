@@ -95,7 +95,7 @@ endif()
 
 # ---------------------------------------------------------------- package config
 #
-# Two ways to consume protoIO with find_package(protoIO 0.2 CONFIG):
+# Two ways to consume protoIO with find_package(protoIO 0.3 CONFIG):
 #   * installed: <prefix>/lib/<arch>/cmake/protoIO/
 #   * from a build tree, without installing: -DprotoIO_DIR=<protoIO>/build_release
 include(CMakePackageConfigHelpers)

@@ -24,6 +24,29 @@ All notable changes to protoIO are recorded here. The project follows
   `Limits` (depth, element count, strict map keys), byte-compatible with
   msgpack-python 1.x.
 - Test vectors generated with CPython under `tests/vectors`.
+- `Error::Kind::Internal` (`kindName`: "Internal"): a failure inside a
+  library protoIO relies on, caused neither by the caller nor by the
+  environment. The OpenSSL-backed digests (`sha256`, `hmacSha256`, `Sha256`)
+  report OpenSSL internal failures with it. A runtime that maps kinds with an
+  exhaustive `switch` (protoST, protoScala, protoClojure) must add a case.
+
+### Changed
+
+- `writeAt` on a descriptor opened with `append` throws `InvalidArgument` on
+  every platform (Linux's `pwrite` used to append and ignore the offset).
+- On Windows, `appendData` writes at the end it read (`GetFileSizeEx`, then
+  positioned `WriteFile`) instead of through the C runtime's append, which a
+  concurrent `readAt` could redirect into the middle of the file.
+- A positioned or whole-file write that makes no progress throws
+  `FileSystem` (EIO) instead of looping.
+- `readAt` caps its allocation at what a regular file holds from the offset.
+
+### Upgrading
+
+- The CMake package uses `SameMinorVersion` compatibility, so
+  `find_package(protoIO 0.2 ...)` does not accept 0.3.0: a consumer that
+  wants these APIs must raise its minimum to 0.3 (protoClojure's
+  `CMakeLists.txt` still asks for 0.2.3).
 
 ## 0.2.3 - not yet tagged
 

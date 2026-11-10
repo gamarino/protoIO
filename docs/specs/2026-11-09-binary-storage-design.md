@@ -107,8 +107,8 @@ Positioned and durable operations on a descriptor:
 | Function | POSIX | Windows | Notes |
 |---|---|---|---|
 | `std::string readAt(int fd, int64 offset, size_t n)` | `pread` loop | `ReadFile` with `OVERLAPPED` offset | Answers fewer bytes only at end of file. |
-| `void writeAt(int fd, int64 offset, string_view data)` | `pwrite` loop | `WriteFile` with `OVERLAPPED` offset | Writes everything or throws. |
-| `int64 appendData(int fd, string_view data)` | `write` loop on an `append` descriptor | same | Answers the offset where the data started. **Contract: one appender per descriptor at a time.** POSIX gives no atomic "where did my append land", and the Windows CRT's `_O_APPEND` is seek + write, so concurrent appenders on one descriptor are not supported. This is documented, and concurrent `readAt` is fine. ProtoBase has a single writer per segment. *My call.* |
+| `void writeAt(int fd, int64 offset, string_view data)` | `pwrite` loop | `WriteFile` with `OVERLAPPED` offset | Writes everything or throws. An `append` descriptor throws `InvalidArgument` (Linux's `pwrite` would append and ignore the offset). |
+| `int64 appendData(int fd, string_view data)` | `write` loop on an `append` descriptor | `GetFileSizeEx`, then `WriteFile` with `OVERLAPPED` at that end (never the file pointer, which a concurrent `readAt` moves) | Answers the offset where the data started. **Contract: one appender per descriptor at a time.** POSIX gives no atomic "where did my append land", and neither does Windows, so concurrent appenders on one descriptor are not supported. This is documented, and concurrent `readAt` is fine. ProtoBase has a single writer per segment. *My call.* |
 | `int64 size(int fd)` | `fstat` | `GetFileSizeEx` | |
 | `void truncate(int fd, int64 size)` | `ftruncate` | `SetFileInformationByHandle` / `SetEndOfFile` | |
 | `void sync(int fd)` | `fsync` | `FlushFileBuffers` | Same as CPython's `os.fsync`. On macOS that is plain `fsync`, not `F_FULLFSYNC`; documented. |
