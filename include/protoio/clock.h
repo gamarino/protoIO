@@ -8,6 +8,10 @@
 
 namespace protoio::clock {
 
+// Call it qualified (protoio::clock::utcMicroseconds): the namespace shares
+// its name with the C library's clock(), so an unqualified clock() becomes
+// ambiguous under `using namespace protoio`.
+
 // Microseconds since 1970-01-01T00:00:00Z (the Unix epoch, leap seconds not
 // counted), from the system's wall clock: clock_gettime(CLOCK_REALTIME) on
 // POSIX, GetSystemTimePreciseAsFileTime on Windows. It is not monotonic: it

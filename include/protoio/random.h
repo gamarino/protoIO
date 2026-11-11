@@ -10,6 +10,10 @@
 
 namespace protoio::random {
 
+// Call these qualified (protoio::random::bytes): the namespace shares its name
+// with the C library's random(), so an unqualified random() becomes ambiguous
+// under `using namespace protoio`.
+
 // The largest draw one call accepts (1 GiB). A runtime sets its own, usually
 // much smaller, bound for its language-level call.
 inline constexpr std::size_t maxBytes = std::size_t{1} << 30;
@@ -19,7 +23,8 @@ inline constexpr std::size_t maxBytes = std::size_t{1} << 30;
 // its parent's bytes.
 //   * Linux: getrandom(2) (flags 0: waits only until the kernel pool is first
 //     initialised at boot), repeated on short reads and EINTR; /dev/urandom
-//     when the kernel predates getrandom (ENOSYS).
+//     when the kernel predates getrandom (ENOSYS) or a seccomp sandbox
+//     forbids it (EPERM), as CPython's os.urandom does.
 //   * macOS and the BSDs: arc4random_buf(3), which cannot fail.
 //   * Windows: BCryptGenRandom with BCRYPT_USE_SYSTEM_PREFERRED_RNG.
 //   * Other POSIX systems: /dev/urandom.

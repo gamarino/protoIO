@@ -3,58 +3,73 @@
 //
 // Random bytes from the operating system's CSPRNG (see protoio/random.h).
 #include "protoio/random.h"
-#include "protoio/error.h"
+#include "internal.h"
 
 #include <cerrno>
 #include <cstdio>
 #include <string>
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <bcrypt.h>
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) \
-    || defined(__DragonFly__)
-#define PROTOIO_RANDOM_ARC4 1
-#include <stdlib.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
-#if defined(__linux__)
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) \
+    || defined(__DragonFly__)
+#define PROTOIO_RANDOM_ARC4 1
+#include <stdlib.h>
+#elif defined(__linux__)
 #include <sys/random.h>
 #endif
 #endif
 
-namespace protoio::random {
-namespace {
+#ifndef _WIN32
+namespace protoio::detail {
 
-#if !defined(_WIN32) && !defined(PROTOIO_RANDOM_ARC4)
-[[noreturn]] void failErrno(const char* what, int err) {
+namespace {
+[[noreturn]] void failRandom(const char* what, int err) {
     throw Error(Error::Kind::Internal, std::string("random::bytes: ") + what + " failed", err);
 }
+} // namespace
 
-// Fills buf from /dev/urandom: older Linux kernels and other POSIX systems.
-void fillFromDevice(char* buf, std::size_t n) {
+std::size_t fillRandom(char* buf, std::size_t n, const RandomCall& call, const char* what,
+                       bool fallbackAllowed) {
+    std::size_t done = 0;
+    while (done < n) {
+        const long r = call(buf + done, n - done);
+        if (r > 0) {
+            done += static_cast<std::size_t>(r);
+            continue;
+        }
+        if (r == 0) failRandom(what, EIO);  // an end of file: the source is broken
+        const int err = errno;
+        if (err == EINTR) continue;
+        if (fallbackAllowed && (err == ENOSYS || err == EPERM)) return done;
+        failRandom(what, err);
+    }
+    return done;
+}
+
+void randomFromDevice(char* buf, std::size_t n) {
     int fd;
     do {
         fd = ::open("/dev/urandom", O_RDONLY | O_CLOEXEC);
     } while (fd < 0 && errno == EINTR);
-    if (fd < 0) failErrno("open /dev/urandom", errno);
-    std::size_t done = 0;
-    while (done < n) {
-        const ssize_t r = ::read(fd, buf + done, n - done);
-        if (r > 0) {
-            done += static_cast<std::size_t>(r);
-        } else if (r < 0 && errno == EINTR) {
-            continue;
-        } else {
-            const int err = r < 0 ? errno : EIO;  // end of file: the device is broken
-            ::close(fd);
-            failErrno("read /dev/urandom", err);
-        }
-    }
-    ::close(fd);
+    if (fd < 0) failRandom("open /dev/urandom", errno);
+    struct Closer {
+        int fd;
+        ~Closer() { ::close(fd); }
+    } closer{fd};
+    fillRandom(buf, n,
+               [fd](char* p, std::size_t len) { return static_cast<long>(::read(fd, p, len)); },
+               "read /dev/urandom", false);
 }
+
+} // namespace protoio::detail
 #endif
+
+namespace protoio::random {
+namespace {
 
 void fill(char* buf, std::size_t n) {
 #if defined(_WIN32)
@@ -75,22 +90,16 @@ void fill(char* buf, std::size_t n) {
 #elif defined(PROTOIO_RANDOM_ARC4)
     ::arc4random_buf(buf, n);
 #elif defined(__linux__)
-    std::size_t done = 0;
-    while (done < n) {
-        const ssize_t r = ::getrandom(buf + done, n - done, 0);
-        if (r > 0) {
-            done += static_cast<std::size_t>(r);
-        } else if (r < 0 && errno == EINTR) {
-            continue;
-        } else if (r < 0 && errno == ENOSYS) {
-            fillFromDevice(buf + done, n - done);  // a kernel older than 3.17
-            return;
-        } else {
-            failErrno("getrandom", r < 0 ? errno : EIO);
-        }
-    }
+    // getrandom(2), flags 0. ENOSYS (a kernel older than 3.17) and EPERM (a
+    // seccomp profile that does not know the call, as some container
+    // runtimes have) finish from /dev/urandom, as CPython's os.urandom does.
+    const std::size_t done = detail::fillRandom(
+        buf, n,
+        [](char* p, std::size_t len) { return static_cast<long>(::getrandom(p, len, 0)); },
+        "getrandom", true);
+    if (done < n) detail::randomFromDevice(buf + done, n - done);
 #else
-    fillFromDevice(buf, n);
+    detail::randomFromDevice(buf, n);
 #endif
 }
 

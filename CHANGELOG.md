@@ -17,7 +17,8 @@ A minor release adding two OS services for protoBaseST: `random::bytes` and
   (UUIDs), nonces and keys. Linux uses `getrandom(2)` with flags 0 (it waits
   only until the kernel pool is first initialised at boot), repeated on short
   reads and `EINTR`, and falls back to `/dev/urandom` on a kernel without it
-  (`ENOSYS`); macOS and the BSDs use `arc4random_buf(3)`, which cannot fail;
+  (`ENOSYS`) or under a seccomp profile that forbids it (`EPERM`), as
+  CPython's `os.urandom` does; macOS and the BSDs use `arc4random_buf(3)`, which cannot fail;
   Windows uses `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG`; other
   POSIX systems read `/dev/urandom`. protoIO keeps no generator state, so
   concurrent calls need no lock and a forked child never repeats its parent's
@@ -33,6 +34,13 @@ A minor release adding two OS services for protoBaseST: `random::bytes` and
 - Tests `test_random` and `test_clock` (labels `random` and `clock`, also in
   the ThreadSanitizer run). The clock test bounds the answer by two
   `std::chrono::system_clock` readings taken around it, never by elapsed time.
+  The POSIX paths behind `random::bytes` (the read loop's short reads and
+  `EINTR`, the `ENOSYS`/`EPERM` fallback, `/dev/urandom`) are tested through
+  `protoio::detail` (`src/internal.h`); Windows' `BCryptGenRandom` chunking
+  (above 4 GiB) is verified by reading only.
+- The namespaces `protoio::random` and `protoio::clock` share their names with
+  the C library's `random()` and `clock()`: call them qualified, since an
+  unqualified `clock()` is ambiguous under `using namespace protoio`.
 
 ### Upgrading
 

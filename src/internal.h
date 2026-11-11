@@ -7,6 +7,7 @@
 #include "protoio/error.h"
 
 #include <atomic>
+#include <functional>
 #include <cstddef>
 #include <memory>
 #include <mutex>
@@ -232,3 +233,34 @@ SSL_CTX* tlsContext(bool verify);
 std::string tlsErrorText();
 
 } // namespace protoio::detail
+
+// ---- random bytes (random.cpp) -------------------------------------------
+//
+// Exposed here, not in the public header, so tests/test_random.cpp can reach
+// the paths that the operating system takes only rarely: short reads, EINTR,
+// a missing or forbidden getrandom, the /dev/urandom fallback.
+#ifndef _WIN32
+namespace protoio::detail {
+
+// One call of a system source of random bytes, as read(2) and getrandom(2)
+// behave: answers the number of bytes written to `buf` (at most `n`, at least
+// 1 for a working source), 0 at an end of file, or -1 with errno set.
+using RandomCall = std::function<long(char* buf, std::size_t n)>;
+
+// Fills `buf` with `n` bytes by repeated calls of `call`, continuing after a
+// short read and retrying on EINTR. When `fallbackAllowed` and a call fails
+// with ENOSYS (the kernel lacks the call) or EPERM (a seccomp sandbox forbids
+// it), it stops and answers the number of bytes already written, fewer than
+// `n`, for the caller to finish from another source. Any other failure, and
+// an end of file, throws Internal naming `what` (sysErrno: the errno, or EIO
+// for an end of file). Otherwise it answers `n`.
+std::size_t fillRandom(char* buf, std::size_t n, const RandomCall& call, const char* what,
+                       bool fallbackAllowed);
+
+// Fills `buf` with `n` bytes from /dev/urandom: the source of POSIX systems
+// without getrandom or arc4random_buf, and Linux's fallback. Throws Internal
+// when the device cannot be opened or read.
+void randomFromDevice(char* buf, std::size_t n);
+
+} // namespace protoio::detail
+#endif
