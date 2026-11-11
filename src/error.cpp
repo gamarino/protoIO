@@ -22,6 +22,7 @@ const char* kindName(Error::Kind kind) noexcept {
         case Error::Kind::InvalidArgument: return "InvalidArgument";
         case Error::Kind::Internal: return "Internal";
         case Error::Kind::Conflict: return "Conflict";
+        case Error::Kind::DepthLimit: return "DepthLimit";
     }
     return "Unknown";
 }

@@ -297,7 +297,8 @@ private:
     }
 
     void container(uint64_t n, bool map) {
-        if (stack_.size() >= limits_.maxDepth) bad("nesting deeper than the depth limit");
+        if (stack_.size() >= limits_.maxDepth)
+            throw Error(Error::Kind::DepthLimit, "msgpack: nesting deeper than the depth limit");
         if (n > limits_.maxElements - elements_) bad("more elements than the element limit");
         // Every element needs at least one byte, every map entry two.
         if ((map ? 2 * n : n) > remaining()) bad("truncated input (declared length exceeds the input)");

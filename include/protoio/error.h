@@ -29,6 +29,8 @@ struct Error : std::runtime_error {
                              // caused neither by the caller nor by the environment
         Conflict,            // an operation conflicts with one already in progress on the
                              // same object (e.g. two appends sharing a file::EndGuard)
+        DepthLimit,          // a document nests deeper than the depth limit (msgpack::Limits::maxDepth),
+                             // told apart from InvalidArgument so a caller can name its own limit
     };
 
     Kind kind;

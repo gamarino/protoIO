@@ -18,6 +18,11 @@ A minor release adding two OS services for protoBaseST: `random::bytes` and
   record envelope adds 2). The reader walks an explicit stack, so the higher
   bound costs no native stack. A caller that wants the old bound passes
   `Limits` with `maxDepth = 512`.
+- A MessagePack document nested deeper than `Limits::maxDepth` throws the new
+  `Error::Kind::DepthLimit` (`kindName` "DepthLimit"), not `InvalidArgument`,
+  so a caller can report its own limit (ProtoBase names `MAX_VALUE_DEPTH`)
+  without matching message text. A consumer that switches over `Error::Kind`
+  meets one more enumerator.
 
 ### Added
 

@@ -32,6 +32,18 @@ void expectInvalid(F f) {
     }
 }
 
+// A document nested too deep: its own kind, so a caller can name its limit.
+template <class F>
+void expectDepthLimit(F f) {
+    try {
+        f();
+        FAIL() << "expected DepthLimit";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::DepthLimit) << e.what();
+        EXPECT_STREQ(protoio::kindName(e.kind), "DepthLimit");
+    }
+}
+
 std::string hex(std::string_view s) {
     static const char* digits = "0123456789abcdef";
     std::string out;
@@ -289,7 +301,7 @@ TEST(Msgpack, Reader_DepthLimit) {
     std::string deep(1100, '\x91');
     deep += '\xc0';
     CountingHandler h;
-    expectInvalid([&] { msgpack::read(deep, h); });
+    expectDepthLimit([&] { msgpack::read(deep, h); });
 
     // Exactly maxDepth levels are accepted, one more is not.
     std::string at(1024, '\x91');
@@ -299,14 +311,14 @@ TEST(Msgpack, Reader_DepthLimit) {
     std::string over(1025, '\x91');
     over += '\x90';
     CountingHandler no;
-    expectInvalid([&] { msgpack::read(over, no); });
+    expectDepthLimit([&] { msgpack::read(over, no); });
 
     msgpack::Limits limits;
     limits.maxDepth = 2;
     CountingHandler two;
     EXPECT_EQ(msgpack::read(std::string_view("\x91\x81\xa1" "k" "\x01", 5), two, limits), 5u);
     CountingHandler three;
-    expectInvalid([&] { msgpack::read(std::string_view("\x91\x91\x90", 3), three, limits); });
+    expectDepthLimit([&] { msgpack::read(std::string_view("\x91\x91\x90", 3), three, limits); });
 }
 
 TEST(Msgpack, Reader_StrictMapKeys) {
