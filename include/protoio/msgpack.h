@@ -76,7 +76,10 @@ struct Handler {
 // can neither exhaust memory nor the stack.
 struct Limits {
     // Maximum nesting of arrays and maps (the top-level container is depth 1).
-    uint32_t maxDepth = 512;
+    // 1024 is msgpack-python 1.2's unpacker limit, and the record depth
+    // ProtoBase format 4 requires every reader to accept (rc2, D60: 1022 for
+    // a value plus 2 for the record envelope).
+    uint32_t maxDepth = 1024;
     // Maximum total of array elements plus map entries declared across the
     // whole document (not per container).
     uint64_t maxElements = 1u << 26;

@@ -286,17 +286,17 @@ TEST(Msgpack, Reader_ElementLimitIsPerDocument) {
 }
 
 TEST(Msgpack, Reader_DepthLimit) {
-    std::string deep(600, '\x91');
+    std::string deep(1100, '\x91');
     deep += '\xc0';
     CountingHandler h;
     expectInvalid([&] { msgpack::read(deep, h); });
 
     // Exactly maxDepth levels are accepted, one more is not.
-    std::string at(512, '\x91');
+    std::string at(1024, '\x91');
     at += '\xc0';
     CountingHandler ok;
     EXPECT_EQ(msgpack::read(at, ok), at.size());
-    std::string over(513, '\x91');
+    std::string over(1025, '\x91');
     over += '\x90';
     CountingHandler no;
     expectInvalid([&] { msgpack::read(over, no); });

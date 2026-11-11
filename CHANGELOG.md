@@ -8,7 +8,16 @@ All notable changes to protoIO are recorded here. The project follows
 ## 0.5.0 - (unreleased)
 
 A minor release adding two OS services for protoBaseST: `random::bytes` and
-`clock::utcMicroseconds`. No existing API changes.
+`clock::utcMicroseconds`, and raising the MessagePack depth default.
+
+### Changed
+
+- `msgpack::Limits::maxDepth` defaults to 1024 (was 512): msgpack-python 1.2's
+  unpacker limit, and the record depth ProtoBase format 4 requires every reader
+  to accept since ProtoBase v2.0.0rc2 (a value nests up to 1022 containers, the
+  record envelope adds 2). The reader walks an explicit stack, so the higher
+  bound costs no native stack. A caller that wants the old bound passes
+  `Limits` with `maxDepth = 512`.
 
 ### Added
 

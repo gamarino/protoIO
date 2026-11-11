@@ -98,7 +98,7 @@ on-disk directory with them). Contracts worth knowing:
 - **MessagePack:** map keys are strict by default (only `str` and `bin`), as
   msgpack-python 1.x. `read()` answers the bytes consumed; a caller that wants
   `unpackb`'s ExtraData behaviour must compare it with the input size.
-  `maxDepth` 512 is stricter than msgpack-python's (about 1024).
+  `maxDepth` defaults to 1024, msgpack-python 1.2's unpacker limit.
 - `base64Decode` rejects non-canonical trailing bits that CPython accepts.
 - `blake2b` is RFC 7693 BLAKE2b with a chosen digest size, not BLAKE2b-512
   truncated.
