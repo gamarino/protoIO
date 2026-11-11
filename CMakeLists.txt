@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(protoIO
-    VERSION 0.4.0
+    VERSION 0.5.0
     DESCRIPTION "Shared input and output (files, processes, TCP, UDP, TLS, HTTP) for the protoCore runtimes"
     HOMEPAGE_URL "https://github.com/gamarino/protoIO"
     LANGUAGES CXX)
@@ -63,6 +63,8 @@ add_library(protoio STATIC
     src/blake2b.cpp
     src/sha.cpp
     src/msgpack.cpp
+    src/random.cpp
+    src/clock.cpp
     ${PROTOIO_PLATFORM_SOURCES}
 )
 add_library(protoIO::protoio ALIAS protoio)
@@ -90,13 +92,14 @@ endif()
 # PUBLIC: consumers link the static archive, so they need its dependencies.
 target_link_libraries(protoio PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 if(WIN32)
-    # crypt32: the system certificate stores (net.cpp).
-    target_link_libraries(protoio PUBLIC ws2_32 crypt32)
+    # crypt32: the system certificate stores (net.cpp); bcrypt: the system
+    # random generator (random.cpp).
+    target_link_libraries(protoio PUBLIC ws2_32 crypt32 bcrypt)
 endif()
 
 # ---------------------------------------------------------------- package config
 #
-# Two ways to consume protoIO with find_package(protoIO 0.4 CONFIG):
+# Two ways to consume protoIO with find_package(protoIO 0.5 CONFIG):
 #   * installed: <prefix>/lib/<arch>/cmake/protoIO/
 #   * from a build tree, without installing: -DprotoIO_DIR=<protoIO>/build_release
 include(CMakePackageConfigHelpers)

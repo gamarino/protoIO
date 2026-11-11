@@ -74,6 +74,8 @@ protoio_test(test_http    http)
 protoio_test(test_encoding encoding)
 protoio_test(test_digest digest)
 protoio_test(test_msgpack msgpack)
+protoio_test(test_random random)
+protoio_test(test_clock clock)
 
 # The Python peer that takes ProtoBase's owner lock (TryLock_ExcludesProtoBasePeer).
 target_compile_definitions(test_file PRIVATE PROTOIO_OWNERLOCK_PEER="${CMAKE_CURRENT_SOURCE_DIR}/ownerlock_peer.py")

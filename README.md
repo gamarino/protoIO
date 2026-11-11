@@ -55,6 +55,8 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 | `protoio/process.h` | `process::run(argv, input)` returns `{exitCode, out, err}` (128 + signal when a signal ended the child); `run(argv, RunOptions{input, directory, environment})` also sets the child's working directory and replaces its environment, without a shell; `shell(command, input)` does the same for a command line handed verbatim to the system shell (`/bin/sh -c`, or `cmd.exe /d /s /c` on Windows); `spawn(argv)`, `wait(pid)`, `kill(pid, sig)`, `getenv`, `setenv`, `environment`, `pid`, `hostName`, `platform`, `exit` |
 | `protoio/net.h` | `net::tcpConnect(host, port, timeoutMs)`, `tcpListen(host, port, backlog)` (an empty host: one dual-stack socket, IPv4 and IPv6), `tcpAccept(fd, timeoutMs)` (`std::nullopt` on timeout or close), `sockName`/`peerName`, `tlsConnect(fd, host, verify)`, `trustCertificates(pem)` (extra trusted CAs), `udpBind`, `udpSend` (resolved in the socket's own address family), `udpReceive(fd, timeoutMs)` (`std::optional<Datagram{data, host, port}>`) |
 | `protoio/http.h` | The HTTP/1.1 message layer and client, below |
+| `protoio/random.h` | `random::bytes(n)`: `n` bytes from the operating system's cryptographically secure generator (`getrandom` on Linux, `arc4random_buf` on macOS and the BSDs, `BCryptGenRandom` on Windows); stateless, so concurrent calls need no lock; over `random::maxBytes` (1 GiB) throws InvalidArgument, a generator failure Internal (0.5.0) |
+| `protoio/clock.h` | `clock::utcMicroseconds()`: microseconds since 1970-01-01T00:00:00Z from the wall clock (`clock_gettime(CLOCK_REALTIME)`, `GetSystemTimePreciseAsFileTime` on Windows); not monotonic, so it dates events and does not measure durations (0.5.0) |
 
 ### Storage operations and encodings
 
@@ -209,9 +211,9 @@ ctest --test-dir build_release --output-on-failure      # sequential
 # ThreadSanitizer (every suite with threads or shared state)
 cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
-setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack' --output-on-failure
+setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack|random|clock' --output-on-failure
 
-# Debian package: protoio-dev_0.4.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.5.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -244,7 +246,7 @@ The install leaves `lib\protoio.lib`, the headers and
 `lib\cmake\protoIO\protoIOConfig.cmake`: a consumer configures with
 `-DCMAKE_PREFIX_PATH=C:/protoio` and the same `OPENSSL_ROOT_DIR`, and uses the
 `find_package` snippet below (`cpack` zips the same tree). protoIO links
-`ws2_32` for its consumers. The library is built for one configuration (`/MD`
+`ws2_32`, `crypt32` and `bcrypt` for its consumers. The library is built for one configuration (`/MD`
 for Release, `/MDd` for Debug): install the one the consumer builds. The test
 programs get the OpenSSL DLLs copied next to them; any other program that
 links protoIO needs them on its `PATH` or beside it.
@@ -390,7 +392,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.4 CONFIG QUIET)
+find_package(protoIO 0.5 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.

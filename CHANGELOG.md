@@ -5,6 +5,43 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.5.0 - (unreleased)
+
+A minor release adding two OS services for protoBaseST: `random::bytes` and
+`clock::utcMicroseconds`. No existing API changes.
+
+### Added
+
+- `protoio/random.h`: `random::bytes(n)` answers `n` bytes from the
+  operating system's cryptographically secure generator, for identifiers
+  (UUIDs), nonces and keys. Linux uses `getrandom(2)` with flags 0 (it waits
+  only until the kernel pool is first initialised at boot), repeated on short
+  reads and `EINTR`, and falls back to `/dev/urandom` on a kernel without it
+  (`ENOSYS`); macOS and the BSDs use `arc4random_buf(3)`, which cannot fail;
+  Windows uses `BCryptGenRandom` with `BCRYPT_USE_SYSTEM_PREFERRED_RNG`; other
+  POSIX systems read `/dev/urandom`. protoIO keeps no generator state, so
+  concurrent calls need no lock and a forked child never repeats its parent's
+  bytes. `n == 0` answers `""`; `n` above `random::maxBytes` (1 GiB) throws
+  `InvalidArgument` before allocating; a failure of the system generator
+  throws `Internal` with the errno (0 on Windows, where the message names the
+  NTSTATUS).
+- `protoio/clock.h`: `clock::utcMicroseconds()` answers the wall clock as
+  microseconds since 1970-01-01T00:00:00Z, from `clock_gettime(CLOCK_REALTIME)`
+  on POSIX and `GetSystemTimePreciseAsFileTime` on Windows. It follows the
+  system clock when that is set or adjusted, so it dates events and must not
+  measure durations.
+- Tests `test_random` and `test_clock` (labels `random` and `clock`, also in
+  the ThreadSanitizer run). The clock test bounds the answer by two
+  `std::chrono::system_clock` readings taken around it, never by elapsed time.
+
+### Upgrading
+
+- On Windows the library now links `bcrypt` (part of the CMake target's
+  PUBLIC link interface, so consumers get it automatically).
+- The CMake package uses `SameMinorVersion` compatibility: a consumer of the
+  new API asks for `find_package(protoIO 0.5 ...)`, and a consumer that asks
+  for 0.4 does not accept 0.5.
+
 ## 0.4.0 - 2026-11-10
 
 A minor release: new API, a new `Error::Kind` value and a changed answer of
