@@ -5,7 +5,7 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
-## 0.5.0 - (unreleased)
+## 0.5.0 - 2026-11-13
 
 A minor release adding two OS services for protoBaseST: `random::bytes` and
 `clock::utcMicroseconds`, and raising the MessagePack depth default.
