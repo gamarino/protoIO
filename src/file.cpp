@@ -120,6 +120,7 @@ std::optional<Stat> stat(const std::string& path) {
 #endif
     s.readable = ::access(path.c_str(), R_OK) == 0;
     s.writable = ::access(path.c_str(), W_OK) == 0;
+    s.linkCount = static_cast<std::int64_t>(st.st_nlink);
     return s;
 }
 
@@ -313,6 +314,12 @@ std::int64_t size(int fd) {
     struct stat st{};
     if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot read the size of");
     return static_cast<std::int64_t>(st.st_size);
+}
+
+std::int64_t linkCount(int fd) {
+    struct stat st{};
+    if (::fstat(fd, &st) != 0) fileError(fdName(fd), errno, "cannot read the link count of");
+    return static_cast<std::int64_t>(st.st_nlink);
 }
 
 void truncate(int fd, std::int64_t newSize) {

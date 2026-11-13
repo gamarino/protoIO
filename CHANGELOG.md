@@ -5,6 +5,32 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.6.0 - unreleased
+
+A minor release adding the hard-link count of a file, so a store that names a
+lock file after the path of its data file can refuse a data file with more
+than one name, as ProtoBase's `open_log` does with `os.fstat(fd).st_nlink`.
+
+### Added
+
+- `file::Stat::linkCount`: the number of hard links (names) of the file at
+  the path (`st_nlink`; `nNumberOfLinks` from `GetFileInformationByHandle` on
+  Windows). Symbolic links are followed, as for the other fields.
+- `file::linkCount(fd)`: the same count for an open descriptor (`fstat`;
+  `GetFileInformationByHandle` on the descriptor's handle on Windows). It
+  describes the file actually opened, whatever the path names by then, so a
+  check made on the descriptor before reading or repairing the file has no
+  race with a rename or a new link. On POSIX a file whose last name was
+  removed while open answers 0. A descriptor that is not open throws
+  `FileSystem` (`EBADF`).
+
+### Upgrading
+
+- `file::Stat` gains a member, so code compiled against 0.5 must be rebuilt
+  (protoIO is a static library; its consumers rebuild anyway).
+- The CMake package uses `SameMinorVersion` compatibility: a consumer of the
+  new API asks for `find_package(protoIO 0.6 ...)`.
+
 ## 0.5.0 - 2026-11-13
 
 A minor release adding two OS services for protoBaseST: `random::bytes` and

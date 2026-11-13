@@ -46,6 +46,7 @@ struct Stat {
     std::int64_t modifiedMs = 0;  // modification time, milliseconds since the epoch
     bool readable = false;        // access(R_OK) for this process
     bool writable = false;        // access(W_OK) for this process
+    std::int64_t linkCount = 0;   // hard links (names) of the file: st_nlink; nNumberOfLinks on Windows
 };
 
 // std::nullopt when nothing exists at `path` (symbolic links are followed).
@@ -148,6 +149,18 @@ std::int64_t appendData(int fd, std::string_view data);
 
 // The size of the file, in bytes (fstat; GetFileSizeEx).
 std::int64_t size(int fd);
+
+// The number of hard links (names) of the open file: fstat's st_nlink;
+// GetFileInformationByHandle's nNumberOfLinks on Windows. A file whose last
+// name was removed while it is open answers 0 (POSIX; Windows may keep
+// counting a name whose deletion waits for the last handle to close). Asked
+// of the descriptor, not a path, so the answer describes the file actually
+// opened, whatever the path names by then: a store that names a lock file
+// after the path of its data file (as ProtoBase's log does, through
+// os.fstat) checks that the file it opened has exactly one name before it
+// reads or repairs it, with no race between the check and the use. The
+// count is a snapshot; another process may add or remove a name at once.
+std::int64_t linkCount(int fd);
 
 // Sets the size of the file (ftruncate), cutting it or extending it with
 // zeros. This overload has no guard (see EndGuard below).

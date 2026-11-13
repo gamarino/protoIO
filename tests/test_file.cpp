@@ -29,6 +29,10 @@
 #include <filesystem>
 #include <fcntl.h>
 #include <io.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -108,6 +112,77 @@ TEST(File, Stat) {
     auto sd = file::stat(d.path);
     ASSERT_TRUE(sd);
     EXPECT_TRUE(sd->isDirectory);
+}
+
+namespace {
+
+// A second name for `existing` (link(2); CreateHardLinkW on Windows).
+void hardLink(const std::string& existing, const std::string& name) {
+#ifdef _WIN32
+    const std::wstring from = std::filesystem::path(existing).wstring();
+    const std::wstring to = std::filesystem::path(name).wstring();
+    ASSERT_TRUE(::CreateHardLinkW(to.c_str(), from.c_str(), nullptr)) << "CreateHardLinkW: " << ::GetLastError();
+#else
+    ASSERT_EQ(::link(existing.c_str(), name.c_str()), 0) << "link: " << std::strerror(errno);
+#endif
+}
+
+} // namespace
+
+// The link count, by path (Stat::linkCount) and of an open descriptor
+// (file::linkCount): one name, two after a hard link, one again after the
+// second name is removed. The descriptor's count follows the file it opened.
+TEST(File, LinkCount) {
+    TempDir d;
+    file::write(d / "log", "data");
+    ASSERT_TRUE(file::stat(d / "log"));
+    EXPECT_EQ(file::stat(d / "log")->linkCount, 1);
+    file::OpenOptions o;
+    o.read = true;
+    o.write = true;
+    const int fd = file::open(d / "log", o);
+    EXPECT_EQ(file::linkCount(fd), 1);
+
+    hardLink(d / "log", d / "alias");
+    EXPECT_EQ(file::linkCount(fd), 2);
+    EXPECT_EQ(file::stat(d / "log")->linkCount, 2);
+    EXPECT_EQ(file::stat(d / "alias")->linkCount, 2);
+    EXPECT_EQ(file::read(d / "alias"), "data");
+
+    EXPECT_TRUE(file::remove(d / "alias"));
+    EXPECT_EQ(file::linkCount(fd), 1);
+    EXPECT_EQ(file::stat(d / "log")->linkCount, 1);
+    protoio::close(fd);
+
+    // A directory answers a count as well (at least 1 on every platform).
+    ASSERT_TRUE(file::stat(d.path));
+    EXPECT_GE(file::stat(d.path)->linkCount, 1);
+}
+
+#ifndef _WIN32
+// POSIX: the last name removed while the file is open leaves 0 links.
+TEST(File, LinkCountOfAnUnlinkedOpenFile) {
+    TempDir d;
+    file::write(d / "gone", "x");
+    const int fd = file::open(d / "gone", file::Mode::Read);
+    EXPECT_TRUE(file::remove(d / "gone"));
+    EXPECT_EQ(file::linkCount(fd), 0);
+    protoio::close(fd);
+}
+#endif
+
+TEST(File, LinkCountOfAClosedDescriptorThrows) {
+    TempDir d;
+    file::write(d / "c", "x");
+    const int fd = file::open(d / "c", file::Mode::Read);
+    protoio::close(fd);
+    try {
+        (void)file::linkCount(fd);
+        ADD_FAILURE() << "no Error was thrown";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::FileSystem);
+        EXPECT_EQ(e.sysErrno, EBADF);
+    }
 }
 
 TEST(File, DirectoriesListRemoveCopyMove) {
