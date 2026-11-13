@@ -5,7 +5,7 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
-## 0.6.0 - unreleased
+## 0.6.0 - 2026-11-13
 
 A minor release adding the hard-link count of a file, so a store that names a
 lock file after the path of its data file can refuse a data file with more
