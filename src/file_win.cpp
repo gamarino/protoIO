@@ -233,6 +233,7 @@ std::optional<Stat> stat(const std::string& path) {
     s.modifiedMs = static_cast<std::int64_t>(ft / 10000) - 11644473600000LL;
     s.readable = ::_waccess(w.c_str(), 4) == 0;
     s.writable = ::_waccess(w.c_str(), 2) == 0;
+    s.linkCount = static_cast<std::int64_t>(info.nNumberOfLinks);
     return s;
 }
 
@@ -450,6 +451,14 @@ std::int64_t size(int fd) {
     LARGE_INTEGER n{};
     if (!::GetFileSizeEx(h, &n)) fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot read the size of");
     return static_cast<std::int64_t>(n.QuadPart);
+}
+
+std::int64_t linkCount(int fd) {
+    const HANDLE h = handleOf(fd, "cannot read the link count of");
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!::GetFileInformationByHandle(h, &info))
+        fileError(fdName(fd), win::errnoOfWin32(::GetLastError()), "cannot read the link count of");
+    return static_cast<std::int64_t>(info.nNumberOfLinks);
 }
 
 void truncate(int fd, std::int64_t newSize) {

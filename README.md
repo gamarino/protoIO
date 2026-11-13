@@ -64,9 +64,15 @@ Added in 0.3.0 as the ground for the runtimes' databases (ProtoBase shares its
 on-disk directory with them). Contracts worth knowing:
 
 - **File operations** (`protoio/file.h`): `open(path, OpenOptions)`, `readAt`,
-  `writeAt`, `appendData`, `size`, `truncate`, `sync`, `dataSync`,
+  `writeAt`, `appendData`, `size`, `linkCount` (0.6.0), `truncate`, `sync`, `dataSync`,
   `syncDirectory`, `replace`, and the lock `tryLock`/`lock`/`unlock`.
 - `readAt` answers fewer bytes than asked only at the end of the file.
+- `linkCount(fd)` (0.6.0) answers the hard links of the open file (`fstat`
+  `st_nlink`; `nNumberOfLinks` on Windows), and `Stat::linkCount` the same for
+  a path. Checked on the descriptor, it describes the file actually opened,
+  whatever the path names by then: a store
+  whose lock file is named after its data file's path refuses a data file
+  with more than one name before reading it, as ProtoBase's log does.
 - One appender per descriptor: `appendData` answers the offset where the data
   starts, which is only well defined with a single appender at a time.
   Concurrent `readAt` calls on the same descriptor are safe. `writeAt` on an
@@ -214,7 +220,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack|random|clock' --output-on-failure
 
-# Debian package: protoio-dev_0.5.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.6.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -393,7 +399,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.5 CONFIG QUIET)
+find_package(protoIO 0.6 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.
