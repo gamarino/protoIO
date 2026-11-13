@@ -69,7 +69,8 @@ on-disk directory with them). Contracts worth knowing:
 - `readAt` answers fewer bytes than asked only at the end of the file.
 - `linkCount(fd)` (0.6.0) answers the hard links of the open file (`fstat`
   `st_nlink`; `nNumberOfLinks` on Windows), and `Stat::linkCount` the same for
-  a path. Checked on the descriptor, it has no race with a rename: a store
+  a path. Checked on the descriptor, it describes the file actually opened,
+  whatever the path names by then: a store
   whose lock file is named after its data file's path refuses a data file
   with more than one name before reading it, as ProtoBase's log does.
 - One appender per descriptor: `appendData` answers the offset where the data

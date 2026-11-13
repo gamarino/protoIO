@@ -19,8 +19,9 @@ than one name, as ProtoBase's `open_log` does with `os.fstat(fd).st_nlink`.
 - `file::linkCount(fd)`: the same count for an open descriptor (`fstat`;
   `GetFileInformationByHandle` on the descriptor's handle on Windows). It
   describes the file actually opened, whatever the path names by then, so a
-  check made on the descriptor before reading or repairing the file has no
-  race with a rename or a new link. On POSIX a file whose last name was
+  check made on the descriptor before reading or repairing the file cannot be
+  misled by a rename or replacement of the path. The count is a snapshot: a
+  name another process adds afterwards is not seen. On POSIX a file whose last name was
   removed while open answers 0. A descriptor that is not open throws
   `FileSystem` (`EBADF`).
 

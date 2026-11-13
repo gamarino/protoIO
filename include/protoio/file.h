@@ -158,8 +158,9 @@ std::int64_t size(int fd);
 // opened, whatever the path names by then: a store that names a lock file
 // after the path of its data file (as ProtoBase's log does, through
 // os.fstat) checks that the file it opened has exactly one name before it
-// reads or repairs it, with no race between the check and the use. The
-// count is a snapshot; another process may add or remove a name at once.
+// reads or repairs it; a check by path could describe another file than the
+// one opened, if the path was renamed or replaced in between. The count is a
+// snapshot: another process may add or remove a name at once.
 std::int64_t linkCount(int fd);
 
 // Sets the size of the file (ftruncate), cutting it or extending it with
