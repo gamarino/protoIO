@@ -342,6 +342,122 @@ std::string absolute(const std::string& path) {
     return win::narrow(s);
 }
 
+namespace {
+
+bool isSeparator(wchar_t c) { return c == L'\\' || c == L'/'; }
+
+// GetFullPathNameW: absolute, "." and ".." folded lexically (as Windows itself
+// reads a path), "/" turned into "\", and no trailing separator except at a
+// root.
+std::wstring fullPathOf(const std::wstring& p, const std::string& path) {
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = ::GetFullPathNameW(p.c_str(), static_cast<DWORD>(buf.size()), buf.data(), nullptr);
+        if (n == 0) fileError(path, win::errnoOfWin32(::GetLastError()), "cannot resolve");
+        if (n < buf.size()) {
+            buf.resize(n);
+            break;
+        }
+        buf.resize(n);  // too small: n counts the terminator
+    }
+    while (buf.size() > 1 && isSeparator(buf.back()) && fs::path(buf) != fs::path(buf).root_path()) buf.pop_back();
+    return buf;
+}
+
+// The final path of an existing file or directory, with symbolic links and
+// junctions followed, without the "\\?\" prefix; false with the Win32 error
+// when it cannot be opened.
+bool finalPathOf(const std::wstring& p, std::wstring& out, DWORD& err) {
+    const HANDLE h = ::CreateFileW(p.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                   OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        err = ::GetLastError();
+        return false;
+    }
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = ::GetFinalPathNameByHandleW(h, buf.data(), static_cast<DWORD>(buf.size()),
+                                                    FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (n == 0) {
+            err = ::GetLastError();
+            ::CloseHandle(h);
+            return false;
+        }
+        if (n < buf.size()) {
+            buf.resize(n);
+            break;
+        }
+        buf.resize(n);  // too small: n counts the terminator
+    }
+    ::CloseHandle(h);
+    if (buf.rfind(L"\\\\?\\UNC\\", 0) == 0) buf = L"\\\\" + buf.substr(8);
+    else if (buf.rfind(L"\\\\?\\", 0) == 0) buf = buf.substr(4);
+    out = std::move(buf);
+    return true;
+}
+
+// The errors that say a component of the path is missing (or not a
+// directory), as CPython's ntpath.realpath(strict=False) lets pass.
+bool isMissing(DWORD e) {
+    switch (e) {
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND:
+        case ERROR_INVALID_NAME:
+        case ERROR_DIRECTORY:
+        case ERROR_BAD_NETPATH:
+        case ERROR_BAD_NET_NAME:
+        case ERROR_NOT_READY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+std::wstring joined(const std::wstring& head, const std::wstring& tail) {
+    if (tail.empty()) return head;
+    return isSeparator(head.back()) ? head + tail : head + L"\\" + tail;
+}
+
+} // namespace
+
+std::string realPath(const std::string& path) {
+    checkNoNul(path, "file::realPath", "the path");
+    // As CPython's ntpath.realpath(strict=False): the final path of the
+    // longest existing prefix, a dangling link followed by hand, and the
+    // missing rest appended as written.
+    std::wstring p = fullPathOf(path.empty() ? std::wstring(L".") : win::widen(path), path);
+    std::wstring tail;
+    std::vector<std::wstring> followed;  // dangling links followed so far
+    for (;;) {
+        std::wstring final;
+        DWORD err = 0;
+        if (finalPathOf(p, final, err)) return win::narrow(joined(final, tail));
+        if (err == ERROR_CANT_RESOLVE_FILENAME) fileError(path, ELOOP, "cannot resolve");  // a link loop
+        if (!isMissing(err)) fileError(path, win::errnoOfWin32(err), "cannot resolve");
+        // A symbolic link (or junction) to a missing target: follow it, so
+        // the answer names the file that creating through the link creates.
+        const DWORD attributes = ::GetFileAttributesW(p.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            std::error_code ec;
+            const fs::path target = fs::read_symlink(fs::path(p), ec);
+            if (!ec && !target.empty()) {
+                for (const auto& f : followed)
+                    if (::CompareStringOrdinal(f.c_str(), -1, p.c_str(), -1, TRUE) == CSTR_EQUAL)
+                        fileError(path, ELOOP, "cannot resolve");
+                followed.push_back(p);
+                const fs::path next = target.is_absolute() ? target : fs::path(p).parent_path() / target;
+                p = fullPathOf(next.native(), path);
+                continue;
+            }
+        }
+        const fs::path fp(p);
+        const fs::path name = fp.filename();
+        if (name.empty() || fp.parent_path() == fp) return win::narrow(joined(p, tail));  // a missing root
+        tail = tail.empty() ? name.native() : name.native() + L"\\" + tail;
+        p = fp.parent_path().native();
+    }
+}
+
 std::string tempDir() {
     std::error_code ec;
     const fs::path p = fs::temp_directory_path(ec);

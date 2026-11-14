@@ -9,8 +9,10 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <climits>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -262,6 +264,165 @@ TEST(File, CwdAndChdir) {
     file::chdir(before);
     EXPECT_EQ(file::cwd(), before);
     EXPECT_FALSE(file::tempDir().empty());
+}
+
+// ------------------------------------------------------------------- realPath
+
+namespace {
+
+#ifdef _WIN32
+constexpr char kSep = '\\';
+#else
+constexpr char kSep = '/';
+#endif
+
+// `base` + "/" + `rel`, with the native separator (realPath answers it).
+std::string under(const std::string& base, std::string rel) {
+    std::replace(rel.begin(), rel.end(), '/', kSep);
+    return base + kSep + rel;
+}
+
+// Creates a symbolic link `link` whose content is `target` (relative targets
+// are relative to the link's directory). False when the system does not let
+// this process create one: Windows asks for a privilege or developer mode.
+bool makeSymlink(std::string target, const std::string& link, bool directory = false) {
+#ifdef _WIN32
+    std::replace(target.begin(), target.end(), '/', '\\');
+    const std::wstring t = std::filesystem::path(target).wstring();
+    const std::wstring l = std::filesystem::path(link).wstring();
+    DWORD flags = 0x2;  // SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE (developer mode)
+    if (directory) flags |= SYMBOLIC_LINK_FLAG_DIRECTORY;
+    if (::CreateSymbolicLinkW(l.c_str(), t.c_str(), flags)) return true;
+    if (::CreateSymbolicLinkW(l.c_str(), t.c_str(), flags & ~DWORD{0x2})) return true;  // older Windows
+    return false;
+#else
+    (void)directory;
+    if (::symlink(target.c_str(), link.c_str()) == 0) return true;
+    ADD_FAILURE() << "symlink " << link << ": " << std::strerror(errno);
+    return false;
+#endif
+}
+
+#define SYMLINK_OR_SKIP(...)                                                                          \
+    do {                                                                                              \
+        if (!makeSymlink(__VA_ARGS__))                                                                \
+            GTEST_SKIP() << "SKIPPED: this process may not create symbolic links (Windows needs the " \
+                            "SeCreateSymbolicLinkPrivilege or developer mode); realPath link cases "  \
+                            "NOT verified here";                                                      \
+    } while (0)
+
+// The temporary directory's own canonical path (it may sit behind a link:
+// macOS's /tmp is /private/tmp; Windows may name it with 8.3 short names).
+std::string canonicalBase(const TempDir& d) {
+    const std::string base = file::realPath(d.path);
+#ifndef _WIN32
+    char b[PATH_MAX];
+    EXPECT_NE(::realpath(d.path.c_str(), b), nullptr);
+    EXPECT_EQ(base, std::string(b));
+#endif
+    EXPECT_TRUE(file::stat(base) && file::stat(base)->isDirectory) << base;
+    return base;
+}
+
+} // namespace
+
+TEST(File, RealPath_PlainFileAndDirectory) {
+    TempDir d;
+    const std::string base = canonicalBase(d);
+    file::write(d / "f.txt", "x");
+    EXPECT_EQ(file::realPath(d / "f.txt"), under(base, "f.txt"));
+    EXPECT_EQ(file::realPath(d / "./f.txt"), under(base, "f.txt"));
+    EXPECT_EQ(file::realPath(d.path + "/"), base);  // no trailing separator
+    // Relative paths and "" go by the working directory.
+    const std::string before = file::cwd();
+    file::chdir(d.path);
+    EXPECT_EQ(file::realPath("f.txt"), under(base, "f.txt"));
+    EXPECT_EQ(file::realPath(""), base);
+    EXPECT_EQ(file::realPath("."), base);
+    file::chdir(before);
+}
+
+TEST(File, RealPath_SymlinkToFile) {
+    TempDir d;
+    const std::string base = canonicalBase(d);
+    file::write(d / "log", "x");
+    SYMLINK_OR_SKIP("log", d / "rel-link");     // relative target
+    SYMLINK_OR_SKIP(d / "log", d / "abs-link");  // absolute target
+    SYMLINK_OR_SKIP("rel-link", d / "chain");   // a link to a link
+    EXPECT_EQ(file::realPath(d / "rel-link"), under(base, "log"));
+    EXPECT_EQ(file::realPath(d / "abs-link"), under(base, "log"));
+    EXPECT_EQ(file::realPath(d / "chain"), under(base, "log"));
+    // The lock name ProtoBase derives is the same by every name.
+    EXPECT_EQ(file::realPath(d / "chain") + ".lock", file::realPath(d / "log") + ".lock");
+}
+
+TEST(File, RealPath_SymlinkedDirectoryInTheMiddle) {
+    TempDir d;
+    const std::string base = canonicalBase(d);
+    file::mkdir(d / "real/sub", true);
+    file::write(d / "real/sub/f", "x");
+    SYMLINK_OR_SKIP("real", d / "ldir", true);
+    SYMLINK_OR_SKIP("real/sub", d / "deep", true);
+    EXPECT_EQ(file::realPath(d / "ldir/sub/f"), under(base, "real/sub/f"));
+    EXPECT_EQ(file::realPath(d / "ldir"), under(base, "real"));
+#ifndef _WIN32
+    // ".." after a link is physical on POSIX: the parent of the target, where
+    // absolute folds it lexically. (Windows folds ".." lexically itself.)
+    EXPECT_EQ(file::realPath(d / "deep/.."), under(base, "real"));
+    EXPECT_EQ(file::realPath(d / "ldir/sub/../sub/f"), under(base, "real/sub/f"));
+#endif
+}
+
+TEST(File, RealPath_MissingTailIsAppended) {
+    TempDir d;
+    const std::string base = canonicalBase(d);
+    file::write(d / "f.txt", "x");
+    EXPECT_EQ(file::realPath(d / "new.log"), under(base, "new.log"));
+    EXPECT_EQ(file::realPath(d / "a/b/c.log"), under(base, "a/b/c.log"));
+    EXPECT_EQ(file::realPath(d / "a/../c.log"), under(base, "c.log"));   // folded lexically
+    EXPECT_EQ(file::realPath(d / "a/./b/"), under(base, "a/b"));
+    EXPECT_EQ(file::realPath(d / "f.txt/x"), under(base, "f.txt/x"));  // not a directory
+    EXPECT_FALSE(file::stat(d / "a"));                                  // nothing created
+    file::mkdir(d / "real");
+    SYMLINK_OR_SKIP("real", d / "ldir", true);
+    // The existing prefix is resolved, the missing rest appended.
+    EXPECT_EQ(file::realPath(d / "ldir/new/log.db"), under(base, "real/new/log.db"));
+}
+
+TEST(File, RealPath_DanglingSymlinkFollowsToItsTarget) {
+    TempDir d;
+    const std::string base = canonicalBase(d);
+    SYMLINK_OR_SKIP("target.log", d / "dangling");
+    // As CPython's os.path.realpath: the target, which creating through the
+    // link would create.
+    EXPECT_EQ(file::realPath(d / "dangling"), under(base, "target.log"));
+    file::mkdir(d / "dir");
+    SYMLINK_OR_SKIP("dir/missing/x.log", d / "into-dir");
+    EXPECT_EQ(file::realPath(d / "into-dir"), under(base, "dir/missing/x.log"));
+    // Created through the link, the file is the target, and the name is stable.
+    file::write(d / "dangling", "x");
+    ASSERT_TRUE(file::stat(d / "target.log"));
+    EXPECT_EQ(file::realPath(d / "dangling"), under(base, "target.log"));
+}
+
+TEST(File, RealPath_LoopThrows) {
+    TempDir d;
+    SYMLINK_OR_SKIP("b", d / "a");
+    SYMLINK_OR_SKIP("a", d / "b");
+    SYMLINK_OR_SKIP("self", d / "self");
+    for (const std::string& p : {d / "a", d / "self", d / "a/x"}) {
+        try {
+            (void)file::realPath(p);
+            ADD_FAILURE() << p << ": no Error was thrown";
+        } catch (const Error& e) {
+            EXPECT_EQ(e.kind, Error::Kind::FileSystem) << p;
+            EXPECT_EQ(e.sysErrno, ELOOP) << p << ": " << e.what();
+        }
+    }
+}
+
+TEST(File, RealPath_NulInPath) {
+    EXPECT_EQ(kindOf([] { file::realPath(std::string("a\0b", 3)); }), Error::Kind::InvalidArgument);
 }
 
 TEST(File, OpenGivesAStreamDescriptor) {

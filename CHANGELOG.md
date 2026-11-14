@@ -5,6 +5,34 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.7.0 - 2026-11-13
+
+A minor release adding the canonical (symbolic-link-resolving) path, so a
+store that names a lock file after its data file's path resolves the path
+first, as ProtoBase's `open_log` does with `os.path.realpath`: two openers
+that reach the same log through a symbolic link and through its real path
+then take the same lock.
+
+### Added
+
+- `file::realPath(path)`: the absolute path with every symbolic link (and
+  junction, on Windows) resolved and "." and ".." folded physically, with the
+  semantics of CPython's non-strict `os.path.realpath`. The existing prefix is
+  resolved by the system (`realpath(3)`; `GetFinalPathNameByHandleW` on
+  Windows, answered without the `\\?\` prefix); the missing rest, or the
+  rest after a component that is not a directory, is appended as written,
+  "." and ".." folded lexically, so a log about to be created has the name it
+  will have once it exists; a dangling symbolic link is followed to its
+  missing target, which creating through the link creates. `""` answers the
+  working directory. Unlike CPython's non-strict form, which never raises, a
+  link loop throws `FileSystem` (`ELOOP`), and a component that cannot be
+  examined (`EACCES`, `ENAMETOOLONG`) throws `FileSystem`.
+
+### Upgrading
+
+- A consumer of the new API asks for `find_package(protoIO 0.7 ...)`
+  (`SameMinorVersion` compatibility).
+
 ## 0.6.0 - 2026-11-13
 
 A minor release adding the hard-link count of a file, so a store that names a

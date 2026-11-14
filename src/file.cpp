@@ -9,8 +9,12 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <system_error>
+#include <unordered_map>
+#include <vector>
 
 #include <fcntl.h>
 #include <sys/file.h>
@@ -188,6 +192,109 @@ std::string absolute(const std::string& path) {
     std::string s = p.lexically_normal().string();
     if (s.size() > 1 && s.back() == '/') s.pop_back();
     return s;
+}
+
+namespace {
+
+// The target of the symbolic link at `link` (readlink(2), grown as needed).
+std::string readLink(const std::string& link, const std::string& path) {
+    std::string buf(256, '\0');
+    for (;;) {
+        const ssize_t n = ::readlink(link.c_str(), buf.data(), buf.size());
+        if (n < 0) fileError(path, errno, "cannot resolve");
+        if (static_cast<std::size_t>(n) < buf.size()) {
+            buf.resize(static_cast<std::size_t>(n));
+            return buf;
+        }
+        buf.resize(buf.size() * 2);
+    }
+}
+
+// CPython's posixpath.realpath(strict=False), component by component, for a
+// path that realpath(3) refused because part of it is missing: lstat each
+// prefix, follow the links found, and append whatever is missing (or not a
+// directory) as written. A loop throws instead of being kept unresolved.
+std::string realPathNonStrict(const std::string& path) {
+    // The parts still to resolve, last first. A marker entry (`isMarker`)
+    // follows the path of a link whose target is being resolved; when it is
+    // popped, the link is recorded as resolved to the path reached.
+    struct Part {
+        std::string name;
+        bool isMarker = false;
+    };
+    std::vector<Part> rest;
+    auto pushParts = [&rest](const std::string& s) {
+        std::vector<std::string> names;
+        std::size_t start = 0;
+        for (;;) {
+            const std::size_t slash = s.find('/', start);
+            names.push_back(s.substr(start, slash == std::string::npos ? std::string::npos : slash - start));
+            if (slash == std::string::npos) break;
+            start = slash + 1;
+        }
+        for (auto it = names.rbegin(); it != names.rend(); ++it) rest.push_back(Part{*it});
+    };
+    pushParts(path);
+    std::string resolved = !path.empty() && path[0] == '/' ? std::string("/") : cwd();
+    // Links met, with their resolution once known; std::nullopt while one is
+    // being resolved, so meeting it again is a loop.
+    std::unordered_map<std::string, std::optional<std::string>> seen;
+    while (!rest.empty()) {
+        Part part = std::move(rest.back());
+        rest.pop_back();
+        if (part.isMarker) {
+            seen[rest.back().name] = resolved;
+            rest.pop_back();
+            continue;
+        }
+        const std::string& name = part.name;
+        if (name.empty() || name == ".") continue;
+        if (name == "..") {
+            const std::size_t slash = resolved.rfind('/');
+            resolved = slash == 0 ? std::string("/") : resolved.substr(0, slash);
+            continue;
+        }
+        std::string next = resolved == "/" ? "/" + name : resolved + "/" + name;
+        struct ::stat st {};
+        if (::lstat(next.c_str(), &st) != 0) {
+            const int e = errno;
+            if (e != ENOENT && e != ENOTDIR) fileError(path, e, "cannot resolve");
+            resolved = std::move(next);  // missing: appended as written
+            continue;
+        }
+        if (!S_ISLNK(st.st_mode)) {
+            resolved = std::move(next);
+            continue;
+        }
+        if (auto it = seen.find(next); it != seen.end()) {
+            if (!it->second) fileError(path, ELOOP, "cannot resolve");
+            resolved = *it->second;
+            continue;
+        }
+        const std::string target = readLink(next, path);
+        if (!target.empty() && target[0] == '/') resolved = "/";
+        seen.emplace(next, std::nullopt);
+        rest.push_back(Part{next});
+        rest.push_back(Part{std::string(), true});
+        pushParts(target);
+    }
+    return resolved;
+}
+
+} // namespace
+
+std::string realPath(const std::string& path) {
+    checkNoNul(path, "file::realPath", "the path");
+    if (!path.empty()) {
+        if (char* r = ::realpath(path.c_str(), nullptr)) {
+            std::string s(r);
+            std::free(r);
+            return s;
+        }
+        const int e = errno;
+        if (e != ENOENT && e != ENOTDIR) fileError(path, e, "cannot resolve");
+    }
+    return realPathNonStrict(path);
 }
 
 std::string tempDir() {

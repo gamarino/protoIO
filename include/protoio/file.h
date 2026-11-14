@@ -78,6 +78,32 @@ std::vector<std::string> list(const std::string& path);
 // no trailing slash (except for "/").
 std::string absolute(const std::string& path);
 
+// The canonical form of `path`: absolute, with every symbolic link (and, on
+// Windows, junction) resolved, and "." and ".." folded physically. It has the
+// semantics of CPython's non-strict os.path.realpath, which ProtoBase uses to
+// name a log's lock file, so two openers that reach one file by different
+// names (a symbolic link to it or to a directory above it, and its real path)
+// derive the same lock name:
+//   - the part of the path that exists is resolved by the system:
+//     realpath(3) on POSIX; GetFinalPathNameByHandleW on Windows, without its
+//     "\\?\" prefix ("\\?\UNC\server\share" answers "\\server\share");
+//   - the part that does not exist yet is appended as written, with "." and
+//     ".." folded lexically, so a file about to be created has the name it
+//     will have once it exists;
+//   - a dangling symbolic link is followed to its (missing) target, as
+//     CPython does: creating a file through the link creates the target;
+//   - a component that is not a directory ("file/x") ends the resolved part,
+//     as a missing one does.
+// "" is the working directory. The answer has no trailing separator (except
+// for a root). As everywhere, the answer may be out of date at once: another
+// process may create, remove or redirect a link meanwhile.
+//
+// Errors (unlike CPython's non-strict form, which never raises): a symbolic
+// link loop throws FileSystem (ELOOP; ERROR_CANT_RESOLVE_FILENAME on
+// Windows); a component that cannot be examined (EACCES, ENAMETOOLONG)
+// throws FileSystem. A missing path is never an error.
+std::string realPath(const std::string& path);
+
 // The system's directory for temporary files.
 std::string tempDir();
 

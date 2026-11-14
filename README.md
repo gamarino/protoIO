@@ -48,7 +48,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 |---|---|
 | `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readBufferedLine(fd, max = 0)` (a line already buffered, never blocking), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
-| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `tempDir`, `cwd`, `chdir`, and the storage operations below, including the end guard `EndGuard` |
+| `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `realPath` (symbolic links resolved, a missing tail appended; 0.7.0), `tempDir`, `cwd`, `chdir`, and the storage operations below, including the end guard `EndGuard` |
 | `protoio/encoding.h` | `encoding::putUint`/`putInt`/`putFloat64`/`putFloat32` and `getUint`/`getInt`/`getFloat64`/`getFloat32` (widths 1, 2, 4, 8; either byte order; as CPython's `struct`), `base64Encode`, `base64Decode` |
 | `protoio/digest.h` | `digest::crc32` (chainable), `crc32Combine`, `blake2b(data, digestSize, key)`, `sha256`, `hmacSha256`, and the incremental `Blake2b` and `Sha256` classes; byte-compatible with CPython's `zlib` and `hashlib` |
 | `protoio/msgpack.h` | `msgpack::Writer` (smallest encodings, as msgpack-python's `packb(use_bin_type=True)`), `Handler` (events for a runtime to build its own objects), `read(data, handler, Limits)`, `Limits {maxDepth, maxElements, strictMapKeys}` |
@@ -73,6 +73,13 @@ on-disk directory with them). Contracts worth knowing:
   whatever the path names by then: a store
   whose lock file is named after its data file's path refuses a data file
   with more than one name before reading it, as ProtoBase's log does.
+- `realPath(path)` (0.7.0) answers the canonical path with symbolic links
+  resolved, as CPython's non-strict `os.path.realpath`: the existing prefix by
+  the system (`realpath(3)`; `GetFinalPathNameByHandleW` on Windows), the
+  missing rest appended as written, a dangling link followed to its target.
+  A store names its lock file after it, so a symbolic link to the data file
+  (or to a directory above it) and the real path take the same lock, as
+  ProtoBase's log does. Unlike CPython, a link loop throws (`ELOOP`).
 - One appender per descriptor: `appendData` answers the offset where the data
   starts, which is only well defined with a single appender at a time.
   Concurrent `readAt` calls on the same descriptor are safe. `writeAt` on an
@@ -220,7 +227,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack|random|clock' --output-on-failure
 
-# Debian package: protoio-dev_0.6.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.7.0_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -267,7 +274,7 @@ The API is the same; what differs:
   library does not make. A socket a runtime creates itself cannot be used
   with the stream functions.
 - **Text.** Paths, arguments and environment strings are UTF-8, converted to
-  and from the UTF-16 the system uses. `absolute`, `cwd` and `tempDir` answer
+  and from the UTF-16 the system uses. `absolute`, `realPath`, `cwd` and `tempDir` answer
   native separators (`C:\dir\file`); `absolute("/")` is the drive root.
 - **Reading is binary.** The library reads every descriptor as bytes with
   `ReadFile`, whatever the C runtime's mode for it. Standard input starts in
@@ -399,7 +406,7 @@ runtime prefers an installed package and falls back to a sibling checkout,
 the same resolution order the runtimes use for protoCore:
 
 ```cmake
-find_package(protoIO 0.6 CONFIG QUIET)
+find_package(protoIO 0.7 CONFIG QUIET)
 if(NOT protoIO_FOUND)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../protoIO/CMakeLists.txt")
         # Developer fallback: build the sibling source tree as part of this one.
