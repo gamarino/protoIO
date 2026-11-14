@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(protoIO
-    VERSION 0.6.0
+    VERSION 0.7.0
     DESCRIPTION "Shared input and output (files, processes, TCP, UDP, TLS, HTTP) for the protoCore runtimes"
     HOMEPAGE_URL "https://github.com/gamarino/protoIO"
     LANGUAGES CXX)
@@ -99,7 +99,7 @@ endif()
 
 # ---------------------------------------------------------------- package config
 #
-# Two ways to consume protoIO with find_package(protoIO 0.6 CONFIG):
+# Two ways to consume protoIO with find_package(protoIO 0.7 CONFIG):
 #   * installed: <prefix>/lib/<arch>/cmake/protoIO/
 #   * from a build tree, without installing: -DprotoIO_DIR=<protoIO>/build_release
 include(CMakePackageConfigHelpers)
