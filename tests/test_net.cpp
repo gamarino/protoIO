@@ -470,142 +470,150 @@ TEST(Net, ConcurrentReaderAndWriterOnOneTcpSocket) {
 
 namespace {
 
-// `n` bytes in a pattern that shows any byte lost, repeated or reordered.
-std::string patterned(std::size_t n) {
+// The byte at `offset` of an endless pattern that shows any byte lost,
+// repeated or reordered.
+char patternAt(std::size_t offset) {
+    return static_cast<char>((offset * 7919u + offset / 251u) & 0xff);
+}
+
+std::string patterned(std::size_t offset, std::size_t n) {
     std::string s(n, '\0');
-    for (std::size_t i = 0; i < n; ++i) s[i] = static_cast<char>((i * 7919u + i / 251u) & 0xff);
+    for (std::size_t i = 0; i < n; ++i) s[i] = patternAt(offset + i);
     return s;
 }
 
-// What a write that must fail throws; fails the test when it returns.
-template <typename F>
-Error writeError(F f) {
-    try {
-        f();
-    } catch (const Error& e) {
-        return e;
-    }
-    ADD_FAILURE() << "the write returned";
-    return Error(Error::Kind::InvalidArgument, "none");
-}
-
-constexpr std::size_t kLarge = 8u << 20;  // far more than the socket buffers hold
+constexpr std::size_t kChunk = 8u << 20;  // more than Linux and macOS socket buffers hold
+// Windows grows a socket's send buffer far beyond that, so a peer that never
+// reads fills it only after several such writes: they are repeated, up to a
+// limit, until one fails.
+constexpr int kMaxChunks = 64;
 // The margin over the timeout a write may take to give up. Generous for a
 // loaded CI machine; before the fix such a write never returned.
 constexpr auto kMargin = 5s;
 
+// Writes kChunk-byte pieces of the pattern, from offset `sent`, until one
+// throws, and answers that error; `sent` ends one past the last byte written
+// (bytesWritten of the failed write included). Each write must return within
+// `timeout` plus the margin.
+Error fillUntilError(int s, std::size_t& sent, std::chrono::milliseconds timeout) {
+    for (int i = 0; i < kMaxChunks; ++i) {
+        const std::string chunk = patterned(sent, kChunk);
+        const auto start = std::chrono::steady_clock::now();
+        try {
+            protoio::write(s, chunk);
+        } catch (const Error& e) {
+            EXPECT_LT(std::chrono::steady_clock::now() - start, timeout + kMargin);
+            EXPECT_LT(e.bytesWritten, kChunk);
+            sent += e.bytesWritten;
+            return e;
+        }
+        EXPECT_LT(std::chrono::steady_clock::now() - start, timeout + kMargin);
+        sent += kChunk;
+    }
+    ADD_FAILURE() << "every write of " << kMaxChunks << " x " << kChunk << " bytes returned";
+    return Error(Error::Kind::InvalidArgument, "none");
+}
+
+// A connected TCP pair over the loopback interface: `client`, and `peer`, the
+// accepted end.
+struct TcpPair {
+    int listener = -1, client = -1, peer = -1;
+    TcpPair() {
+        listener = net::tcpListen("127.0.0.1", 0);
+        client = net::tcpConnect("127.0.0.1", net::sockName(listener).port, 2000);
+        auto c = net::tcpAccept(listener, 5000);
+        if (!c) throw std::runtime_error("accept timed out");
+        peer = *c;
+    }
+    ~TcpPair() {
+        protoio::close(client);
+        protoio::close(peer);
+        protoio::close(listener);
+    }
+};
+
 } // namespace
 
 TEST(Net, ALargeWriteToAPeerThatNeverReadsTimesOut) {
-    const int listener = net::tcpListen("127.0.0.1", 0);
-    const int port = net::sockName(listener).port;
-    const int s = net::tcpConnect("127.0.0.1", port, 2000);
-    auto peer = net::tcpAccept(listener, 5000);
-    ASSERT_TRUE(peer);
-    protoio::setTimeout(s, 300);
-    const auto start = std::chrono::steady_clock::now();
-    Error e = writeError([&] { protoio::write(s, std::string(kLarge, 'x')); });
-    EXPECT_LT(std::chrono::steady_clock::now() - start, 300ms + kMargin);
+    TcpPair pair;
+    protoio::setTimeout(pair.client, 300);
+    std::size_t sent = 0;
+    Error e = fillUntilError(pair.client, sent, 300ms);
     EXPECT_EQ(e.kind, Error::Kind::ConnectionTimedOut) << e.what();
-    EXPECT_LT(e.bytesWritten, kLarge);
-    EXPECT_NE(std::string(e.what()).find(" of " + std::to_string(kLarge) + " bytes written"), std::string::npos)
+    EXPECT_NE(std::string(e.what()).find(" of " + std::to_string(kChunk) + " bytes written"), std::string::npos)
         << e.what();
-    protoio::close(s);
-    protoio::close(*peer);
-    protoio::close(listener);
 }
 
 // bytesWritten is exact and the stream goes on: the peer, once it reads,
-// gets exactly the leading bytesWritten bytes, and writing the rest delivers
-// the whole data, in order, with nothing lost or repeated.
+// gets exactly the bytes written, and writing the rest of the failed piece
+// continues the byte stream with nothing lost or repeated.
 TEST(Net, ATimedOutWriteReportsExactlyWhatWasWrittenAndTheRestCanFollow) {
-    const int listener = net::tcpListen("127.0.0.1", 0);
-    const int port = net::sockName(listener).port;
-    const int s = net::tcpConnect("127.0.0.1", port, 2000);
-    auto peer = net::tcpAccept(listener, 5000);
-    ASSERT_TRUE(peer);
-    const std::string data = patterned(kLarge);
-    protoio::setTimeout(s, 200);
-    Error e = writeError([&] { protoio::write(s, data); });
+    TcpPair pair;
+    protoio::setTimeout(pair.client, 200);
+    std::size_t sent = 0;
+    Error e = fillUntilError(pair.client, sent, 200ms);
     ASSERT_EQ(e.kind, Error::Kind::ConnectionTimedOut) << e.what();
-    ASSERT_GT(e.bytesWritten, 0u);
-    ASSERT_LT(e.bytesWritten, data.size());
+    // The rest of the piece that failed, then the end of the stream.
+    const std::size_t total = sent + (kChunk - e.bytesWritten);
 
-    std::string received;
+    std::size_t received = 0, wrong = 0;
     std::thread reader([&] {
-        protoio::setTimeout(*peer, 10000);
-        while (received.size() < data.size()) {
-            auto chunk = protoio::readBytes(*peer, data.size() - received.size());
+        protoio::setTimeout(pair.peer, 20000);
+        while (received < total) {
+            auto chunk = protoio::readBytes(pair.peer, std::min<std::size_t>(total - received, 1u << 20));
             if (!chunk) break;
-            received += *chunk;
+            for (std::size_t i = 0; i < chunk->size(); ++i)
+                if ((*chunk)[i] != patternAt(received + i)) ++wrong;
+            received += chunk->size();
         }
     });
-    protoio::setTimeout(s, 10000);
-    protoio::write(s, std::string_view(data).substr(e.bytesWritten));
+    protoio::setTimeout(pair.client, 20000);
+    protoio::write(pair.client, patterned(sent, total - sent));
     reader.join();
-    EXPECT_EQ(received.size(), data.size());
-    EXPECT_TRUE(received == data) << "the bytes after the timed-out write are not the data's rest";
-    protoio::close(s);
-    protoio::close(*peer);
-    protoio::close(listener);
+    EXPECT_EQ(received, total);
+    EXPECT_EQ(wrong, 0u) << "the bytes after the timed-out write are not the data's rest";
 }
 
 // The deadline is for the whole write, not for each wait: a peer that keeps
-// reading a little at a time never lets any single wait expire, yet the
-// write must still give up once the timeout has passed.
+// reading a little at a time never lets any single wait expire, yet each write
+// must still give up once the timeout has passed.
 TEST(Net, ATrickleReaderDoesNotExtendTheWriteDeadline) {
-    const int listener = net::tcpListen("127.0.0.1", 0);
-    const int port = net::sockName(listener).port;
-    const int s = net::tcpConnect("127.0.0.1", port, 2000);
-    auto peer = net::tcpAccept(listener, 5000);
-    ASSERT_TRUE(peer);
+    TcpPair pair;
     std::atomic<bool> stop{false};
     std::thread trickle([&] {
-        protoio::setTimeout(*peer, 50);
+        protoio::setTimeout(pair.peer, 50);
         while (!stop.load()) {
             try {
-                (void)protoio::readBytes(*peer, 4096);
+                (void)protoio::readBytes(pair.peer, 4096);
             } catch (const Error&) {}
             std::this_thread::sleep_for(20ms);
         }
     });
-    protoio::setTimeout(s, 400);
-    const auto start = std::chrono::steady_clock::now();
-    // At 4 KiB per 20 ms the 8 MiB would take about 40 s.
-    Error e = writeError([&] { protoio::write(s, std::string(kLarge, 'y')); });
-    EXPECT_LT(std::chrono::steady_clock::now() - start, 400ms + kMargin);
+    protoio::setTimeout(pair.client, 400);
+    // At 4 KiB per 20 ms one 8 MiB piece would take about 40 s.
+    std::size_t sent = 0;
+    Error e = fillUntilError(pair.client, sent, 400ms);
     EXPECT_EQ(e.kind, Error::Kind::ConnectionTimedOut) << e.what();
-    EXPECT_LT(e.bytesWritten, kLarge);
     stop.store(true);
     trickle.join();
-    protoio::close(s);
-    protoio::close(*peer);
-    protoio::close(listener);
 }
 
 TEST(Net, AWriteWithinItsTimeoutStillWritesEverything) {
-    const int listener = net::tcpListen("127.0.0.1", 0);
-    const int port = net::sockName(listener).port;
-    const int s = net::tcpConnect("127.0.0.1", port, 2000);
-    auto peer = net::tcpAccept(listener, 5000);
-    ASSERT_TRUE(peer);
-    const std::string data = patterned(kLarge);
+    TcpPair pair;
+    const std::string data = patterned(0, kChunk);
     std::string received;
     std::thread reader([&] {
-        protoio::setTimeout(*peer, 20000);
+        protoio::setTimeout(pair.peer, 20000);
         while (received.size() < data.size()) {
-            auto chunk = protoio::readBytes(*peer, data.size() - received.size());
+            auto chunk = protoio::readBytes(pair.peer, data.size() - received.size());
             if (!chunk) break;
             received += *chunk;
         }
     });
-    protoio::setTimeout(s, 20000);
-    protoio::write(s, data);
+    protoio::setTimeout(pair.client, 20000);
+    protoio::write(pair.client, data);
     reader.join();
     EXPECT_TRUE(received == data);
-    protoio::close(s);
-    protoio::close(*peer);
-    protoio::close(listener);
 }
 
 TEST(Net, ATlsWriteToAPeerThatNeverReadsTimesOutAndTheSessionRefusesMoreWrites) {
@@ -614,15 +622,19 @@ TEST(Net, ATlsWriteToAPeerThatNeverReadsTimesOutAndTheSessionRefusesMoreWrites) 
     protoio::setTimeout(s, 5000);
     net::tlsConnect(s, "localhost", false);
     protoio::setTimeout(s, 300);
-    const auto start = std::chrono::steady_clock::now();
-    Error e = writeError([&] { protoio::write(s, std::string(kLarge, 'z')); });
-    EXPECT_LT(std::chrono::steady_clock::now() - start, 300ms + kMargin);
+    std::size_t sent = 0;
+    Error e = fillUntilError(s, sent, 300ms);
     EXPECT_EQ(e.kind, Error::Kind::ConnectionTimedOut) << e.what();
-    EXPECT_LT(e.bytesWritten, kLarge);
     // The socket buffers took some records before the peer's window filled.
-    EXPECT_GT(e.bytesWritten, 0u);
+    EXPECT_GT(sent, 0u);
     EXPECT_EQ(e.bytesWritten % 16384, 0u) << "TLS counts whole records";
-    Error again = writeError([&] { protoio::write(s, "more"); });
+    Error again = Error(Error::Kind::InvalidArgument, "none");
+    try {
+        protoio::write(s, "more");
+        ADD_FAILURE() << "a write after the timed-out one returned";
+    } catch (const Error& later) {
+        again = later;
+    }
     EXPECT_EQ(again.kind, Error::Kind::Network) << again.what();
     EXPECT_EQ(again.bytesWritten, 0u);
     protoio::close(s);

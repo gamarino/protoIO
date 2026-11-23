@@ -436,14 +436,35 @@ public:
 private:
     SOCKET s_ = INVALID_SOCKET;
 };
+#else
+// While alive, keeps a socket non-blocking (O_NONBLOCK), where send(2) does
+// not honour MSG_DONTWAIT (detail::kSendHonoursDontWait). A socket that was
+// non-blocking already is left as it was. A concurrent reader is unaffected:
+// it reads only after poll(2) reported input.
+class NonBlockingSend {
+public:
+    explicit NonBlockingSend(int fd) : fd_(fd) {
+        const int flags = ::fcntl(fd, F_GETFL);
+        if (flags >= 0 && !(flags & O_NONBLOCK) && ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0) restore_ = true;
+    }
+    ~NonBlockingSend() {
+        if (restore_) ::fcntl(fd_, F_SETFL, ::fcntl(fd_, F_GETFL) & ~O_NONBLOCK);
+    }
+    NonBlockingSend(const NonBlockingSend&) = delete;
+    NonBlockingSend& operator=(const NonBlockingSend&) = delete;
+
+private:
+    int fd_;
+    bool restore_ = false;
+};
 #endif
 
 } // namespace
 
 // The timeout bounds the whole write, not each wait: a deadline is taken once
 // and every wait for room gets what is left of it. A socket never blocks in
-// the kernel's send (MSG_DONTWAIT; on Windows the socket is non-blocking for
-// the call), and a pipe or terminal with a timeout is written at most
+// the kernel's send (MSG_DONTWAIT; on macOS and Windows the socket is
+// non-blocking for the call), and a pipe or terminal with a timeout is written at most
 // PIPE_BUF bytes at a time, each only once poll(2) reports room, so a write
 // never blocks for longer than the deadline. When the deadline passes with
 // data left, ConnectionTimedOut (FileSystem with ETIMEDOUT on a pipe) is
@@ -515,6 +536,8 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
         }
 #else
         const bool bounded = left.ms() >= 0;
+        std::optional<NonBlockingSend> nonBlocking;
+        if (st.isSocket && bounded && !kSendHonoursDontWait) nonBlocking.emplace(st.fd);
         while (done < size) {
             ssize_t w;
             if (st.isSocket) {

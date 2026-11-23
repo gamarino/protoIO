@@ -175,8 +175,9 @@ status (or 413 for BodyTooLarge and 400 for Network from `readBody`).
   in `poll` bounded by `setTimeout`.
 - **Write timeouts** (0.7.1): `setTimeout` is a deadline for a whole
   `write`, however large: the write never waits past it, in `poll` or in the
-  kernel (a socket is sent to with `MSG_DONTWAIT`, non-blocking for the call
-  on Windows; a pipe or terminal with a timeout takes `PIPE_BUF` bytes at a
+  kernel (a socket is sent to with `MSG_DONTWAIT` on Linux and made
+  non-blocking for the call on macOS, whose `send` ignores that flag, and on
+  Windows; a pipe or terminal with a timeout takes `PIPE_BUF` bytes at a
   time, after `poll` reported room). A socket throws `ConnectionTimedOut`,
   the error a timed-out read throws; a pipe throws `FileSystem` with
   `ETIMEDOUT`. A read's timeout bounds each wait for input instead.

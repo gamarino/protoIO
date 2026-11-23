@@ -17,8 +17,9 @@ connection was closed.
 ### Fixed
 
 - `protoio::write` honours the descriptor's timeout as a deadline for the
-  whole call. A socket is written with `MSG_DONTWAIT` (non-blocking for the
-  call on Windows), and every wait for room gets what is left of the
+  whole call. A socket is written with `MSG_DONTWAIT` on Linux; on macOS,
+  whose `send` blocks despite that flag, and on Windows it is non-blocking
+  for the call. Every wait for room gets what is left of the
   deadline, so neither the waits nor the kernel extend it. A peer that reads
   a little at a time no longer keeps a write going past its timeout. On
   expiry a socket throws `ConnectionTimedOut`, the error a timed-out read

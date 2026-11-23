@@ -40,6 +40,8 @@ inline int newSocket(int family, int type, int protocol, bool nonBlocking) {
 inline int acceptSocket(int fd) { return ::accept4(fd, nullptr, nullptr, SOCK_CLOEXEC); }
 inline int newPipe(int fds[2]) { return ::pipe2(fds, O_CLOEXEC); }
 inline constexpr int kNoSigpipe = MSG_NOSIGNAL;
+// send(2) honours MSG_DONTWAIT on a blocking socket (rawWrite).
+inline constexpr bool kSendHonoursDontWait = true;
 #else
 inline void noSigpipe(int fd) {
 #ifdef SO_NOSIGPIPE
@@ -80,6 +82,9 @@ inline int newPipe(int fds[2]) {
     return 0;
 }
 inline constexpr int kNoSigpipe = 0;
+// macOS's send(2) blocks on a blocking TCP socket even with MSG_DONTWAIT, so
+// rawWrite makes the socket non-blocking for the length of a timed write.
+inline constexpr bool kSendHonoursDontWait = false;
 #endif
 } // namespace protoio::detail
 #endif
