@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Gustavo Marino <gamarino@gmail.com>. MIT licensed.
 #pragma once
 
+#include <cstddef>
 #include <stdexcept>
 #include <string>
 
@@ -35,6 +36,12 @@ struct Error : std::runtime_error {
 
     Kind kind;
     int sysErrno;
+    // For a failed protoio::write: how many
+    // leading bytes of the data were written before the failure, 0 for any
+    // other error. On a socket without TLS they reached the kernel and the
+    // stream goes on after them, so a caller may write the rest; a TLS session
+    // cannot be written again after a failed write (see protoio::write).
+    std::size_t bytesWritten = 0;
 
     Error(Kind k, const std::string& message, int err = 0)
         : std::runtime_error(message), kind(k), sysErrno(err) {}

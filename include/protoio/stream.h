@@ -81,6 +81,21 @@ bool atEnd(int fd);
 
 // Writes all of `data`. Throws FileSystem (a file or pipe), Network or
 // ConnectionTimedOut (a socket) on failure; never raises SIGPIPE.
+//
+// The descriptor's timeout (setTimeout) is a deadline for the whole call,
+// however large `data` is: the write never waits past it, neither in poll nor
+// in the kernel's send. When the deadline passes with data left, a socket
+// throws ConnectionTimedOut, the error a read that times out throws (a pipe
+// or terminal throws FileSystem with ETIMEDOUT). Every failure of a write
+// sets Error::bytesWritten to the exact number of leading bytes of `data`
+// that were written, from 0 to data.size() - 1:
+//   - a socket without TLS, a pipe or a file: those bytes were handed to the
+//     kernel, and the rest were not. The stream is still usable; writing
+//     data.substr(e.bytesWritten) later continues the byte stream exactly.
+//   - a TLS session: the bytes of the records OpenSSL completed, counted
+//     record by record (16 KiB). The record in progress is half-sent, and
+//     OpenSSL can only finish it with the same bytes, so the session refuses
+//     every later write (Network); it may still be read and closed.
 void write(int fd, std::string_view data);
 
 // Flushes the C stdio buffer of descriptors 1 and 2; a no-op for others
@@ -96,8 +111,9 @@ void close(int fd);
 // Bounds every later wait on this descriptor (read, write, TLS handshake) to
 // `ms` milliseconds; a wait that expires throws ConnectionTimedOut on a
 // socket, FileSystem with ETIMEDOUT on a pipe or terminal (the console on
-// Windows). -1 waits without limit (the default). On Windows a write to a
-// pipe ignores it.
+// Windows). -1 waits without limit (the default). A read's timeout bounds
+// each wait for input; a write's bounds the whole write (see write). On
+// Windows a write to a pipe ignores it.
 void setTimeout(int fd, int ms);
 
 // Drops any state the library holds for a descriptor number that the caller

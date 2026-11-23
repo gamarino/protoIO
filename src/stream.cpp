@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <climits>
+#include <optional>
 
 #ifdef _WIN32
 #include <io.h>
@@ -311,7 +312,11 @@ bool waitReady(FdState& st, short events, int timeoutMs) {
 }
 #endif
 
-int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
+namespace {
+
+// sslCall's loop. Each wait OpenSSL asks for is bounded by what is left of
+// `deadline`, or, without one, by the descriptor's timeout.
+int sslCallWithin(FdState& st, int (*op)(SSL*, void*), void* arg, const Remaining* deadline) {
     for (;;) {
         SSL* ssl = st.ssl.load();
         if (!ssl || st.closed.load()) { errno = EBADF; return -1; }
@@ -335,7 +340,10 @@ int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
         if (r > 0) return r;
         if (e == SSL_ERROR_ZERO_RETURN) return 0;
         if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
-            if (!waitReady(st, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, st.timeoutMs.load())) {
+            // Past a deadline no wait is left, not even a zero one; a plain
+            // timeout of 0 still polls once, as it always did.
+            const int ms = deadline ? deadline->ms() : st.timeoutMs.load();
+            if ((deadline && ms == 0) || !waitReady(st, e == SSL_ERROR_WANT_READ ? POLLIN : POLLOUT, ms)) {
                 errno = ETIMEDOUT;
                 return -1;
             }
@@ -345,6 +353,12 @@ int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
         errno = (e == SSL_ERROR_SYSCALL && savedErrno != 0) ? savedErrno : EIO;
         return -1;
     }
+}
+
+} // namespace
+
+int sslCall(FdState& st, int (*op)(SSL*, void*), void* arg) {
+    return sslCallWithin(st, op, arg, nullptr);
 }
 
 // ------------------------------------------------------------ read / write
@@ -390,29 +404,95 @@ ssize_t rawRead(FdState& st, char* out, std::size_t n) {
 
 } // namespace
 
+namespace {
+
+// What a failed write reports: the operation and how far it got.
+std::string writeWhat(const char* what, std::size_t done, std::size_t size) {
+    return std::string(what) + " (" + std::to_string(done) + " of " + std::to_string(size) + " bytes written)";
+}
+
+#ifdef _WIN32
+// While alive, keeps a blocking TCP socket non-blocking, so a send takes only
+// what fits and the wait for room is the bounded WSAPoll. Only a stream
+// socket without TLS is switched: those are always blocking (tcpConnect,
+// tcpAccept), so switching back is exact. A UDP socket is non-blocking for
+// good and a TLS socket is handled by OpenSSL; neither is touched.
+class NonBlockingSend {
+public:
+    explicit NonBlockingSend(SOCKET s) {
+        int type = 0;
+        int len = static_cast<int>(sizeof type);
+        if (::getsockopt(s, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&type), &len) == 0 && type == SOCK_STREAM) {
+            win::setNonBlocking(s, true);
+            s_ = s;
+        }
+    }
+    ~NonBlockingSend() {
+        if (s_ != INVALID_SOCKET) win::setNonBlocking(s_, false);
+    }
+    NonBlockingSend(const NonBlockingSend&) = delete;
+    NonBlockingSend& operator=(const NonBlockingSend&) = delete;
+
+private:
+    SOCKET s_ = INVALID_SOCKET;
+};
+#endif
+
+} // namespace
+
+// The timeout bounds the whole write, not each wait: a deadline is taken once
+// and every wait for room gets what is left of it. A socket never blocks in
+// the kernel's send (MSG_DONTWAIT; on Windows the socket is non-blocking for
+// the call), and a pipe or terminal with a timeout is written at most
+// PIPE_BUF bytes at a time, each only once poll(2) reports room, so a write
+// never blocks for longer than the deadline. When the deadline passes with
+// data left, ConnectionTimedOut (FileSystem with ETIMEDOUT on a pipe) is
+// thrown with Error::bytesWritten set; every other failure sets it too.
 void rawWrite(FdState& st, const char* data, std::size_t size) {
     SigpipeGuard noSigpipe;
+    const Remaining left(st.timeoutMs.load());
     std::size_t done = 0;
-    while (done < size) {
-        ssize_t w;
+    try {
         if (st.ssl.load()) {
-            struct Buf { const char* p; int n; } b{data + done, static_cast<int>(std::min<std::size_t>(size - done, 1 << 30))};
-            const int r = sslCall(st, [](SSL* s, void* a) {
-                auto* b = static_cast<Buf*>(a);
-                return SSL_write(s, b->p, b->n);
-            }, &b);
-            if (r <= 0) netError(r == 0 ? EPIPE : errno, "TLS write");
-            w = r;
-        } else {
+            if (st.tlsWriteFailed)
+                throw Error(Error::Kind::Network,
+                            "TLS write: an earlier write on this session failed or timed out part-way, so the "
+                            "session cannot be written any more");
+            // One record (16 KiB of data) per SSL_write, so the count of bytes
+            // written moves record by record.
+            constexpr std::size_t kRecord = 16384;
+            while (done < size) {
+                struct Buf { const char* p; int n; } b{data + done, static_cast<int>(std::min(size - done, kRecord))};
+                const int r = sslCallWithin(st, [](SSL* s, void* a) {
+                    auto* b = static_cast<Buf*>(a);
+                    return SSL_write(s, b->p, b->n);
+                }, &b, &left);
+                if (r <= 0) {
+                    // OpenSSL holds a record it must finish with these same
+                    // bytes; the session cannot take other data after it.
+                    st.tlsWriteFailed = true;
+                    netError(r == 0 ? EPIPE : errno, writeWhat("TLS write", done, size));
+                }
+                done += static_cast<std::size_t>(r);
+            }
+            return;
+        }
 #ifdef _WIN32
-            if (!waitReady(st, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
+        std::optional<NonBlockingSend> nonBlocking;
+        if (st.isSocket && left.ms() >= 0) nonBlocking.emplace(win::socketOf(st.fd));
+        while (done < size) {
             const int want = static_cast<int>(std::min<std::size_t>(size - done, 1 << 30));
+            int w;
             if (st.isSocket) {
+                if (st.closed.load()) netError(EPIPE, writeWhat("write", done, size));
                 const int r = ::send(win::socketOf(st.fd), data + done, want, 0);
                 if (r == SOCKET_ERROR) {
                     const int e = ::WSAGetLastError();
-                    if (e == WSAEWOULDBLOCK) continue;  // a non-blocking (UDP) socket: wait again
-                    netError(win::errnoOfWsa(e), "write");
+                    if (e != WSAEWOULDBLOCK) netError(win::errnoOfWsa(e), writeWhat("write", done, size));
+                    // No room: wait for it, within what is left of the deadline.
+                    const int ms = left.ms();
+                    if (ms == 0 || !waitReady(st, POLLOUT, ms)) netError(ETIMEDOUT, writeWhat("write", done, size));
+                    continue;
                 }
                 w = r;
             } else {
@@ -425,22 +505,53 @@ void rawWrite(FdState& st, const char* data, std::size_t size) {
                     // A pipe whose reader is gone: EPIPE, as on POSIX.
                     const unsigned long os = _doserrno;
                     const int e = (os == ERROR_NO_DATA || os == ERROR_BROKEN_PIPE) ? EPIPE : errno;
-                    fileError("descriptor " + std::to_string(st.fd), e, "cannot write to");
+                    fileError("descriptor " + std::to_string(st.fd) + ", " + std::to_string(done) + " of " +
+                                  std::to_string(size) + " bytes written",
+                              e, "cannot write to");
                 }
                 w = r;
             }
+            done += static_cast<std::size_t>(w);
+        }
 #else
-            if (!waitReady(st, POLLOUT, st.timeoutMs.load())) netError(ETIMEDOUT, "write");
-            w = st.isSocket ? ::send(st.fd, data + done, size - done, detail::kNoSigpipe)
-                            : ::write(st.fd, data + done, size - done);
+        const bool bounded = left.ms() >= 0;
+        while (done < size) {
+            ssize_t w;
+            if (st.isSocket) {
+                w = ::send(st.fd, data + done, size - done, detail::kNoSigpipe | MSG_DONTWAIT);
+            } else {
+                // A blocking write(2) to a pipe waits until all of it fits;
+                // with a timeout only PIPE_BUF bytes go at a time, after poll
+                // reported room, which a pipe guarantees for PIPE_BUF bytes.
+                // Room now is taken at once; otherwise wait for what is left.
+                if (bounded && !waitReady(st, POLLOUT, 0)) {
+                    const int ms = left.ms();
+                    if (ms == 0 || !waitReady(st, POLLOUT, ms))
+                        fileError("descriptor " + std::to_string(st.fd) + ", " + std::to_string(done) + " of " +
+                                      std::to_string(size) + " bytes written",
+                                  ETIMEDOUT, "cannot write to");
+                }
+                w = ::write(st.fd, data + done, bounded ? std::min<std::size_t>(size - done, PIPE_BUF) : size - done);
+            }
             if (w < 0) {
                 if (errno == EINTR) continue;
-                if (st.isSocket) netError(errno, "write");
-                fileError("descriptor " + std::to_string(st.fd), errno, "cannot write to");
+                if (st.isSocket && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    // No room: wait for it, within what is left of the deadline.
+                    const int ms = left.ms();
+                    if (ms == 0 || !waitReady(st, POLLOUT, ms)) netError(ETIMEDOUT, writeWhat("write", done, size));
+                    continue;
+                }
+                if (st.isSocket) netError(errno, writeWhat("write", done, size));
+                fileError("descriptor " + std::to_string(st.fd) + ", " + std::to_string(done) + " of " +
+                              std::to_string(size) + " bytes written",
+                          errno, "cannot write to");
             }
-#endif
+            done += static_cast<std::size_t>(w);
         }
-        done += static_cast<std::size_t>(w);
+#endif
+    } catch (Error& e) {
+        e.bytesWritten = done;
+        throw;
     }
 }
 

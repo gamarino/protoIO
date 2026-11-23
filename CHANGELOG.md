@@ -5,6 +5,54 @@ All notable changes to protoIO are recorded here. The project follows
 
 ## Unreleased
 
+## 0.7.1 - 2026-11-23
+
+A patch release: a socket's timeout now bounds a large write. Before it, a
+write of megabytes to a peer that stopped reading waited in the kernel's
+`send` without limit, whatever `setTimeout` said, because only the wait
+before each `send` was bounded and the `send` of the whole remainder blocked.
+protoBaseST's cluster transport could stay in one such write until the
+connection was closed.
+
+### Fixed
+
+- `protoio::write` honours the descriptor's timeout as a deadline for the
+  whole call. A socket is written with `MSG_DONTWAIT` (non-blocking for the
+  call on Windows), and every wait for room gets what is left of the
+  deadline, so neither the waits nor the kernel extend it. A peer that reads
+  a little at a time no longer keeps a write going past its timeout. On
+  expiry a socket throws `ConnectionTimedOut`, the error a timed-out read
+  throws.
+- A pipe or terminal with a timeout (POSIX) is written `PIPE_BUF` bytes at a
+  time once `poll` reports room, so its write is bounded too (it throws
+  `FileSystem` with `ETIMEDOUT`, as a timed-out pipe read does). Without a
+  timeout, and for regular files, writes are unchanged.
+- TLS writes take the same deadline for the whole call; before, each wait
+  OpenSSL asked for got the full timeout again.
+
+### Added
+
+- `Error::bytesWritten`: for a failed write, the exact number of leading
+  bytes of the data that were written (0 for every other error). Without
+  TLS those bytes reached the kernel and the rest did not, so the stream
+  stays usable and writing the rest continues it exactly. A TLS write
+  counts whole records (16 KiB each); after a failed or timed-out TLS write
+  the session refuses later writes (`Network`), because OpenSSL can finish
+  the half-sent record only with the same bytes. The error message states
+  the count too ("write (N of M bytes written): ...").
+
+### Upgrading
+
+- `protoio::Error` gains a member: consumers rebuild (protoIO is a static
+  library). The API is otherwise unchanged; `find_package(protoIO 0.7 ...)`
+  accepts 0.7.1.
+- A write that used to block until a slow peer took everything now fails
+  at the timeout. A caller that wants a write to take as long as it needs
+  leaves the timeout at -1 (the default) or raises it for the write.
+- `http::Request::timeoutMs` now bounds the whole write of the request (head
+  and body) as well, not each wait during it; the response is still waited
+  for per wait. An upload that takes longer needs a larger `timeoutMs`.
+
 ## 0.7.0 - 2026-11-13
 
 A minor release adding the canonical (symbolic-link-resolving) path, so a

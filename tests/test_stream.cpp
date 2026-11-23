@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cerrno>
 #include <chrono>
 #include <map>
 #include <mutex>
@@ -569,6 +570,36 @@ TEST(Stream, ConsoleInputHonoursTimeoutsAndIsUtf8OnWindows) {
     ASSERT_EQ(waited, WAIT_OBJECT_0) << "the console child hung:\n" << report;
     if (report.find("[  SKIPPED ]") != std::string::npos) GTEST_SKIP() << report;
     EXPECT_EQ(code, 0u) << report;
+}
+#endif
+
+#ifndef _WIN32
+// A pipe with a timeout: a write larger than the pipe holds gives up at the
+// deadline (blocking write(2) would wait for a reader for ever), reporting
+// exactly the bytes that went in. Windows pipe writes ignore the timeout.
+TEST(Stream, TimeoutBoundsAPipeWriteAndReportsTheBytesWritten) {
+    Pipe p;
+    const std::size_t size = 4u << 20;
+    std::string data(size, '\0');
+    for (std::size_t i = 0; i < size; ++i) data[i] = static_cast<char>(i * 131u);
+    protoio::setTimeout(p.w, 300);
+    const auto start = std::chrono::steady_clock::now();
+    std::size_t written = size;
+    try {
+        protoio::write(p.w, data);
+        ADD_FAILURE() << "the write returned";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind, Error::Kind::FileSystem) << e.what();
+        EXPECT_EQ(e.sysErrno, ETIMEDOUT);
+        written = e.bytesWritten;
+    }
+    EXPECT_LT(std::chrono::steady_clock::now() - start, 5300ms);
+    ASSERT_GT(written, 0u);
+    ASSERT_LT(written, size);
+    p.closeWriter();
+    const std::string got = protoio::readAll(p.r);
+    EXPECT_EQ(got.size(), written);
+    EXPECT_TRUE(got == data.substr(0, written));
 }
 #endif
 

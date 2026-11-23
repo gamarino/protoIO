@@ -173,6 +173,9 @@ struct FdState {
     std::string buf;                  // guarded by readMutex
     std::size_t head = 0;             // guarded by readMutex
     bool eof = false;                 // guarded by readMutex
+    // A TLS write failed or timed out part-way, leaving a record OpenSSL must
+    // finish with the same data: the session refuses every later write.
+    bool tlsWriteFailed = false;      // guarded by writeMutex
     std::atomic<SSL*> ssl{nullptr};
     std::atomic<int> timeoutMs{-1};   // -1: block without limit
     std::atomic<bool> closed{false};
@@ -218,7 +221,9 @@ bool takeBufferedLine(FdState& st, std::size_t max, std::string& line);
 // The caller holds readMutex.
 std::string takeBytes(FdState& st, std::size_t n);
 
-// Writes all of `data`. The caller holds writeMutex.
+// Writes all of `data` within the descriptor's timeout, a deadline for the
+// whole call (see protoio::write). A failure records in Error::bytesWritten
+// how many leading bytes were written. The caller holds writeMutex.
 void rawWrite(FdState& st, const char* data, std::size_t size);
 
 // Runs `op` (an SSL call) once under sslMutex. Answers the call's result
