@@ -165,7 +165,8 @@ struct Request {
     std::string url;                  // http:// or https://
     Headers headers;                  // names are sent in lower case
     std::optional<std::string> body;  // std::nullopt: no body
-    int timeoutMs = 30000;            // connect, and each wait for the peer
+    int timeoutMs = 30000;            // connect, the whole write of the request (0.7.1),
+                                      // and each wait for the response
     int maxRedirects = 5;
     std::string userAgent;            // empty: "protoIO/<version>"
 };

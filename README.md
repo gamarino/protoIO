@@ -46,7 +46,7 @@ Everything is in namespace `protoio`. Descriptors are plain `int`s.
 
 | Header | Contents |
 |---|---|
-| `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; }` and `kindName(kind)` |
+| `protoio/error.h` | `struct Error : std::runtime_error { Kind kind; int sysErrno; std::size_t bytesWritten; }` and `kindName(kind)` |
 | `protoio/stream.h` | `readLine(fd, max = 0)` (`std::nullopt` at end; LF or CRLF stripped; over `max` throws LineTooLong), `readBufferedLine(fd, max = 0)` (a line already buffered, never blocking), `readAll`, `readBytes(fd, n)`, `readChars(fd, n)` (whole UTF-8 characters), `atEnd`, `write`, `flush`, `close`, `setTimeout(fd, ms)`, `forget(fd)`, and `SigpipeGuard` |
 | `protoio/file.h` | `file::open(path, Mode)`, `read`, `write`, `append`, `stat` (`std::optional<Stat>`), `remove(path, recursive)`, `move`, `copy` (trees too), `mkdir(path, parents)`, `list` (sorted names), `absolute` (lexical: keeps symbolic links), `realPath` (symbolic links resolved, a missing tail appended; 0.7.0), `tempDir`, `cwd`, `chdir`, and the storage operations below, including the end guard `EndGuard` |
 | `protoio/encoding.h` | `encoding::putUint`/`putInt`/`putFloat64`/`putFloat32` and `getUint`/`getInt`/`getFloat64`/`getFloat32` (widths 1, 2, 4, 8; either byte order; as CPython's `struct`), `base64Encode`, `base64Decode` |
@@ -173,6 +173,22 @@ status (or 413 for BodyTooLarge and 400 for Network from `readBody`).
   so a filter piped into `head` stops as Unix filters do.
 - **TLS:** a TLS socket is non-blocking; the handshake, reads and writes wait
   in `poll` bounded by `setTimeout`.
+- **Write timeouts** (0.7.1): `setTimeout` is a deadline for a whole
+  `write`, however large: the write never waits past it, in `poll` or in the
+  kernel (a socket is sent to with `MSG_DONTWAIT` on Linux and made
+  non-blocking for the call on macOS, whose `send` ignores that flag, and on
+  Windows; a pipe or terminal with a timeout takes `PIPE_BUF` bytes at a
+  time, after `poll` reported room). A socket throws `ConnectionTimedOut`,
+  the error a timed-out read throws; a pipe throws `FileSystem` with
+  `ETIMEDOUT`. A read's timeout bounds each wait for input instead.
+  - Every failed write sets `Error::bytesWritten` to the exact number of
+    leading bytes written. Without TLS those bytes reached the kernel and no
+    others did: the stream is still usable, and writing the rest
+    (`data.substr(e.bytesWritten)`) continues it exactly.
+  - With TLS the count moves record by record (16 KiB). The record in
+    progress is half-sent and OpenSSL can finish it only with the same
+    bytes, so the session refuses every later write (`Network`); it can
+    still be read and closed.
 - **Descriptors the runtime opens itself** (with `pipe(2)`, `dup(2)`, ...)
   should be announced with `protoio::forget(fd)` in case the library holds a
   stale state for a reused number. Descriptors created by the library are
@@ -227,7 +243,7 @@ cmake -S . -B build_tsan -DCMAKE_BUILD_TYPE=Debug -DPROTOIO_TSAN=ON
 cmake --build build_tsan -j4
 setarch "$(uname -m)" -R ctest --test-dir build_tsan -L 'stream|net|process|file|encoding|digest|msgpack|random|clock' --output-on-failure
 
-# Debian package: protoio-dev_0.7.0_<arch>.deb (static library, headers, CMake package)
+# Debian package: protoio-dev_0.7.1_<arch>.deb (static library, headers, CMake package)
 (cd build_release && cpack -G DEB)
 ```
 
@@ -305,7 +321,8 @@ The API is the same; what differs:
   (any character, outside line mode): blocked on the console handle while
   nothing is typed, re-checking every 10 ms while a line is partly typed.
   Typed characters are echoed once the read starts, that is when the line
-  is complete. A write to a pipe ignores the timeout. `close` does not wake a
+  is complete. A write to a pipe ignores the timeout; a write to a socket
+  honours it as a deadline for the whole write (0.7.1). `close` does not wake a
   thread blocked reading a pipe (nor does it on POSIX; the contract is for
   sockets).
 - **Errors.** Winsock and Win32 codes are mapped to the errno values of the

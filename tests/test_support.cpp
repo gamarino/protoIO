@@ -11,6 +11,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
+#include <chrono>
 #include <cstdlib>
 #include <stdexcept>
 
@@ -212,6 +213,30 @@ TlsEchoServer::TlsEchoServer(bool caSigned) {
 }
 
 TlsEchoServer::~TlsEchoServer() {
+    delete raw_;
+    SSL_CTX_free(static_cast<SSL_CTX*>(ctx_));
+}
+
+TlsSilentServer::TlsSilentServer() {
+    std::string unusedCaPem;
+    SSL_CTX* ctx = makeServerContext(false, unusedCaPem);
+    ctx_ = ctx;
+    raw_ = new RawServer([this, ctx](int fd) {
+        SSL* ssl = SSL_new(ctx);
+#ifdef _WIN32
+        SSL_set_fd(ssl, static_cast<int>(protoio::net::nativeSocket(fd)));
+#else
+        SSL_set_fd(ssl, fd);
+#endif
+        if (SSL_accept(ssl) == 1) {
+            while (!release_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        SSL_free(ssl);
+    });
+}
+
+TlsSilentServer::~TlsSilentServer() {
+    release_.store(true);
     delete raw_;
     SSL_CTX_free(static_cast<SSL_CTX*>(ctx_));
 }

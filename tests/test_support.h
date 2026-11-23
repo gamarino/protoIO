@@ -83,4 +83,20 @@ private:
     std::string caPem_;
 };
 
+// A TLS server on 127.0.0.1 (self-signed, for "localhost") that completes
+// the handshake of each connection and then never reads from it, so the
+// client's writes fill the connection; it lets the connection go when
+// destroyed.
+class TlsSilentServer {
+public:
+    TlsSilentServer();
+    ~TlsSilentServer();
+    int port() const { return raw_ ? raw_->port() : 0; }
+
+private:
+    void* ctx_ = nullptr;  // SSL_CTX*
+    std::atomic<bool> release_{false};
+    RawServer* raw_ = nullptr;
+};
+
 } // namespace protoio_test
